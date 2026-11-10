@@ -1,0 +1,18 @@
+{
+  "teammateMode": "auto",
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/task-completed.sh"],
+            "timeout": 3000,
+            "statusMessage": "Task gate: tests, then reviewer"
+          }
+        ]
+      }
+    ]
+  }
+}

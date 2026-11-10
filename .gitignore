@@ -1,0 +1,19 @@
+# dependencies & build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# secrets — Stripe test keys, agent private JWKs, approver token live here
+.env
+.env.*
+!.env.example
+
+# task-gate working files (diffs, test logs, reviewer verdicts)
+.gate/
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
+
+.DS_Store
