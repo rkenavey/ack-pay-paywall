@@ -28,10 +28,11 @@ Fail only for a problem in this list, and only when you can name the file and li
 7. **Module boundaries.** A violation of the import rules in `CLAUDE.md` section 5 (for example the policy module importing I/O, or the server agent importing payment-service internals).
 8. **Scope.** Changes outside the paths the task owns that the task brief does not justify, or implementation logic inside T1 stubs.
 9. **Stripe practice (T5).** Card data touching our server, server-side confirmation in production code, fulfilment keyed on the client's word rather than the PaymentIntent retrieved server-side or a verified webhook, missing idempotency key on PaymentIntent creation, or Stripe.js bundled instead of loaded from Stripe.
+10. **Documentation.** A document the task owns (`CLAUDE.md` section 7, Documentation) is missing, describes something the code does not do, shows a command or route that does not exist, or refers the reader to `CLAUDE.md`. An exported symbol the task added has no TSDoc comment. Behaviour documented by an earlier task was changed without updating that document.
 
 ## What does not block
 
-Style preferences, naming you would have chosen differently, optional refactors, extra hardening the spec does not ask for, missing features that belong to a later task. Put these in `notes`. A task with only notes passes.
+Style preferences, naming you would have chosen differently, the wording or polish of a document that is accurate, optional refactors, extra hardening the spec does not ask for, missing features that belong to a later task. Put these in `notes`. A task with only notes passes.
 
 If the spec is silent or ambiguous on a point, the implementation's reasonable reading passes; record the ambiguity in `notes` so a human can tighten the spec.
 

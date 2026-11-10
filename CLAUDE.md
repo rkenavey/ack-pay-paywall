@@ -60,6 +60,7 @@ Receipt revocation lists, `did:web` hosting, ACK-ID controller credentials, `ser
 6. **Secrets.** Stripe keys, private JWKs and the approver token live only in `.env` (gitignored). Never print, log or commit them, and never send a secret key to the browser. Test-mode Stripe keys only.
 7. **Fail closed.** A missing config value, an unverifiable token, an unknown state or a policy error means no payment and no resource.
 8. **Server-derived money.** Amount, currency and payee always come from the verified payment request token, never from a client-supplied field.
+9. **Document as you go.** Each task writes the documentation for what it builds, in the same task (section 7, Documentation). A task whose documentation is missing or wrong does not conform to this spec.
 
 ## 3. Interfaces
 
@@ -462,6 +463,7 @@ TypeScript in strict mode, ESM, Node 22 or later, pnpm workspaces. Server: Hono 
 
 ```
 CLAUDE.md  .claude/                      human-owned spec and gate
+README.md  docs/                         documentation for people, written task by task (section 7)
 package.json  pnpm-workspace.yaml  tsconfig.base.json  eslint.config.js
 vitest.config.ts  vitest.live.config.ts  .env.example
 packages/
@@ -647,7 +649,7 @@ Seven tasks. If `TaskList` does not already show them, create them with these ex
 
 | Task | Subject | Blocked by | Owns |
 | :- | :- | :- | :- |
-| T1 | `T1: Test suite, contracts and scaffold` | none | root config, `packages/protocol`, `packages/testkit`, every test directory, stubs |
+| T1 | `T1: Test suite, contracts and scaffold` | none | root config, `packages/protocol`, `packages/testkit`, every test directory, stubs, first `README.md` |
 | T2 | `T2: Spend policy engine` | T1 | `packages/server/src/policy` |
 | T3 | `T3: Server agent and payment service` | T1, T2 | the rest of `packages/server/src` except `stripe/` and `approvals/` |
 | T4 | `T4: Client agent and UI` | T3 | `packages/client/src/agent`, `packages/client/src/ui` |
@@ -662,21 +664,47 @@ T1 ─▶ T2 ─▶ T3 ─▶ T4 ─┬─▶ T5 ─┬─▶ T7
 
 T5 and T6 can run at the same time only in separate git worktrees, because both touch `app.ts` and the client's root component. The second to finish merges `main` into its branch and passes its gate again before it is merged. Everything else runs one at a time in the main checkout.
 
-**T1: Test suite, contracts and scaffold.** Set up the workspace of section 5 with the root scripts. Implement `@paywall/protocol` fully: types, schemas, constants, event names, money helpers. Implement `@paywall/testkit`. Write every test in section 6. Create each exported function and factory of section 3 as a stub with its final signature and a body that throws `NotImplementedError("T<n>")`; stubs contain no logic. Add `.env.example`. Done when the protocol tests pass, everything typechecks and lints, every acceptance ID has a test, and every other test directory fails because of the stubs.
+### Documentation
 
-**T2: Spend policy engine.** Implement `evaluateSpend` and `parseSpendPolicyConfig` as section 3.4 specifies. Nothing else. Done when POL-1 to POL-7 pass.
+Documentation is written in the task that builds the thing, not saved for the end. Each task owns the documents below and finishes them before it closes.
 
-**T3: Server agent and payment service.** Implement `createServerAgent`, `createPaymentService` with the sandbox adapter and receipt issuance, the in-memory stores, config parsing, identity loading, the console log sink, `buildApp`, `main.ts` and `pnpm setup:env`. Wire the real policy from T2. Implement policy `deny` and the creation of `pending_approval` payments; the approver routes are T6, so until then a payment above $50 waits forever, which is the safe behaviour. Done when SA-1 to SA-14 and PS-1 to PS-13 pass.
+| Task | Writes |
+| :- | :- |
+| T1 | `README.md` first version: what the project is, prerequisites, install, the root scripts, the repository layout, and a "What works today" list. `docs/protocol.md`: every route, body, error code and event of the wire contract. `docs/testing.md`: how to run the tests, how they are organised, what the acceptance IDs are, what the testkit provides. `docs/decisions.md`, started. A comment for every variable in `.env.example`. |
+| T2 | `docs/policy.md`: the rules in the order they apply, a table of example inputs and the decision each gets, and how to configure the allowlist and threshold. |
+| T3 | `docs/server.md`: the server agents and the payment service, each route with an example request and response, the configuration table, how to start the server, and a real log excerpt from one paid request with each line explained. |
+| T4 | `docs/client.md`: the flow states, what each region of the page shows, how the agent's identity is stored and why that is demo-grade. `docs/architecture.md`: the roles, who holds which key, and a sequence diagram that maps each ACK step to the code and the event it emits. README: how to run the sandbox demo. |
+| T5 | `docs/stripe.md`: getting test-mode keys, where they go, the webhook with the Stripe CLI, the test cards, what the server verifies before it issues a receipt, and how to run the live test. |
+| T6 | `docs/approvals.md`: who the approver is, the approver routes, a walk-through of the panel, and what happens on approve, reject and expiry. |
+| T7 | README finished: quickstart from a fresh clone, the three demo scenarios step by step, links to every page in `docs/`. Every earlier document read against the running system and corrected. |
 
-**T4: Client agent and UI.** Implement `createPaywallClient`, the sandbox executor, the browser identity, and the React page with the catalog and agent run regions. Confirm `vite build` works with `agentcommercekit` in the bundle and note any polyfill it needed. Done when CL-1 to CL-13, UI-1 to UI-5 and E2E-1 to E2E-3 pass, and the sandbox flow works in a browser against `pnpm dev`.
+Rules for all of it:
 
-**T5: Stripe payment option.** Implement section 4: the real `StripeGateway`, the Stripe adapter, the webhook route, config guards, the browser executor with the Payment Element, and the live test. Ask the human for the test-mode keys at the start. Done when STR-1 to STR-9 and E2E-4 pass, `pnpm test:stripe-live` passes (STR-10), and the three manual card checks of section 4 are recorded in the hand-off.
+- **In the code.** Every exported type, function and constant in `packages/protocol`, and every exported function, factory and interface elsewhere, has a TSDoc comment: one sentence on what it is for, then whatever a caller cannot see from the signature (units, who may call it, what happens on failure). Other comments say why, not what. Do not restate the code.
+- **For a reader who has never seen this file.** The README and `docs/` stand alone. They do not point at `CLAUDE.md`, and neither code nor docs cite its section numbers or the task numbers. The two exceptions are the `spec-fix(T<n>)` marker in tests and the `NotImplementedError("T<n>")` stubs.
+- **Only what exists.** A document describes what works at the end of the task that wrote it. No placeholders and no "coming soon". The README's "What works today" list grows task by task.
+- **Checked, not imagined.** Every command, request and response shown in a document was run, and pasted output is real output with secrets removed. Example values for secrets are obvious placeholders.
+- **Keep earlier documents true.** A task that changes behaviour another task documented updates that document in the same task. That is the one case where editing a document you do not own is expected.
+- **Decisions.** When you make a choice this spec left open, add an entry to `docs/decisions.md`: what was decided, why, and what was rejected. Three or four lines each, newest last.
+- **Short.** About a page per document. Link to another page instead of repeating it.
 
-**T6: Human approval flow.** Implement the approver routes, the approve, reject and expiry transitions, and the approver panel. Done when APR-1 to APR-7, UI-6, UI-7, E2E-5 and E2E-6 pass.
+### Task briefs
 
-**T7: Integration and demo.** Make the whole suite green on the merged result, including E2E-7 and the build. Write `README.md`: setup, `pnpm setup:env`, `pnpm dev`, the three demo scenarios, how to add Stripe keys, how to read the logs. Run all three catalog scenarios in a browser. Remove any leftover stub or `NotImplementedError`. Done when the full gate passes.
+**T1: Test suite, contracts and scaffold.** Set up the workspace of section 5 with the root scripts. Implement `@paywall/protocol` fully: types, schemas, constants, event names, money helpers. Implement `@paywall/testkit`. Write every test in section 6. Create each exported function and factory of section 3 as a stub with its final signature and a body that throws `NotImplementedError("T<n>")`; stubs contain no logic. Add `.env.example`. Done when the protocol tests pass, everything typechecks and lints, every acceptance ID has a test, every other test directory fails because of the stubs, and the T1 documents are written.
 
-**Hand-off.** When you finish a task, say what you built, any `spec-fix` test changes and why, anything in the spec you found ambiguous, and what you verified by hand.
+**T2: Spend policy engine.** Implement `evaluateSpend` and `parseSpendPolicyConfig` as section 3.4 specifies. Nothing else in code. Done when POL-1 to POL-7 pass and `docs/policy.md` is written.
+
+**T3: Server agent and payment service.** Implement `createServerAgent`, `createPaymentService` with the sandbox adapter and receipt issuance, the in-memory stores, config parsing, identity loading, the console log sink, `buildApp`, `main.ts` and `pnpm setup:env`. Wire the real policy from T2. Implement policy `deny` and the creation of `pending_approval` payments; the approver routes are T6, so until then a payment above $50 waits forever, which is the safe behaviour. Done when SA-1 to SA-14 and PS-1 to PS-13 pass and `docs/server.md` is written from a real run.
+
+**T4: Client agent and UI.** Implement `createPaywallClient`, the sandbox executor, the browser identity, and the React page with the catalog and agent run regions. Confirm `vite build` works with `agentcommercekit` in the bundle and note any polyfill it needed. Done when CL-1 to CL-13, UI-1 to UI-5 and E2E-1 to E2E-3 pass, the sandbox flow works in a browser against `pnpm dev`, and `docs/client.md`, `docs/architecture.md` and the README's demo instructions are written.
+
+**T5: Stripe payment option.** Implement section 4: the real `StripeGateway`, the Stripe adapter, the webhook route, config guards, the browser executor with the Payment Element, and the live test. Ask the human for the test-mode keys at the start. Done when STR-1 to STR-9 and E2E-4 pass, `pnpm test:stripe-live` passes (STR-10), the three manual card checks of section 4 are recorded in the hand-off, and `docs/stripe.md` is written.
+
+**T6: Human approval flow.** Implement the approver routes, the approve, reject and expiry transitions, and the approver panel. Done when APR-1 to APR-7, UI-6, UI-7, E2E-5 and E2E-6 pass and `docs/approvals.md` is written.
+
+**T7: Integration and demo.** Make the whole suite green on the merged result, including E2E-7 and the build. Run all three catalog scenarios in a browser. Finish `README.md`: quickstart from a fresh clone, `pnpm setup:env`, `pnpm dev`, the three demo scenarios, how to add Stripe keys, how to read the logs, and links to every page in `docs/`. Read every document in `docs/` against the running system and correct what has drifted. Remove any leftover stub or `NotImplementedError`. Done when the full gate passes and the documentation matches the system.
+
+**Hand-off.** When you finish a task, say what you built, which documents you wrote or updated, any `spec-fix` test changes and why, anything in the spec you found ambiguous, and what you verified by hand.
 
 ## 8. The gate
 
