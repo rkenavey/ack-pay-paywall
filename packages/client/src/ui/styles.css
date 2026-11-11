@@ -1,0 +1,52 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --text: #1d1d1b;
+  --muted: #5f5f5a;
+  --border: #d9d9d4;
+  --accent: #2357c6;
+  --ok: #1d7a3a;
+  --bad: #b3261e;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.45;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --panel: #20201e;
+    --text: #ececea;
+    --muted: #a3a39d;
+    --border: #3a3a37;
+    --accent: #7aa2ff;
+    --ok: #6fcf8a;
+    --bad: #ff8a80;
+  }
+}
+body { margin: 0; background: var(--bg); color: var(--text); }
+.page { max-width: 960px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+.masthead h1 { margin: 0 0 4px; font-size: 1.4rem; }
+.identity small { color: var(--muted); }
+code { font-size: 0.85em; overflow-wrap: anywhere; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.panel h2 { margin-top: 0; font-size: 1.15rem; }
+.catalog { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.catalog li { display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; align-items: center; }
+.catalog .agent { color: var(--muted); }
+.catalog .price { font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .catalog li { grid-template-columns: 1fr auto; } }
+button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+.status { font-weight: 600; }
+.status-delivered { color: var(--ok); }
+.status-failed { color: var(--bad); }
+.timeline { font-size: 0.9rem; padding-left: 1.5rem; }
+.timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.timeline .event-name { color: var(--muted); }
+.decoded dl, .failure dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
+.decoded dt, .failure dt { color: var(--muted); }
+.decoded dd, .failure dd { margin: 0; }
+.failure dl > div { display: contents; }
+li.selected { font-weight: 600; }
+.failure, .error { color: var(--bad); }
+.resource { border-left: 3px solid var(--ok); padding-left: 12px; }

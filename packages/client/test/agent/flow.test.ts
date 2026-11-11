@@ -1,7 +1,7 @@
 import { getDidResolver, verifyJwt, verifyPaymentReceipt, type PaymentRequest } from "agentcommercekit"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { RECEIPT_HEADER } from "@paywall/protocol"
-import { buildPaymentRequest, fixtures, PAYMENT_SERVICE_URL } from "@paywall/testkit"
+import { BASE_URL, buildPaymentRequest, fixtures, PAYMENT_SERVICE_URL } from "@paywall/testkit"
 import { FAKE_RESOURCES, resourceUrl } from "../support/fake-paywall.ts"
 import { setupClient } from "../support/client.ts"
 
@@ -64,8 +64,10 @@ describe("client agent flow", () => {
 
   it("CL-3: a 402 body that is not a payment-required body fails payment_request_invalid", async () => {
     const { client, paywall } = setupClient()
-    paywall.stub.on("GET", resourceUrl("broken"), () => Response.json({ paymentRequest: { id: "x" }, paymentRequestToken: "nope" }, { status: 402 }))
-    const state = await client.fetchPaid(resourceUrl("broken"))
+    // spec-fix(T4): the FakePaywall's /api/resources/:id route shadowed this stub (FetchStub is first-match), so the client saw a 404, not the malformed 402 this test is about
+    const brokenUrl = `${BASE_URL}/broken/resources/broken`
+    paywall.stub.on("GET", brokenUrl, () => Response.json({ paymentRequest: { id: "x" }, paymentRequestToken: "nope" }, { status: 402 }))
+    const state = await client.fetchPaid(brokenUrl)
     expect(state.status).toBe("failed")
     expect(state.failure?.code).toBe("payment_request_invalid")
     expect(paywall.paymentServiceCalls()).toHaveLength(0)

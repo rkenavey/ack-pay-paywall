@@ -59,3 +59,17 @@ Choices that were left open, newest last.
 **`pnpm setup:env` generates Ed25519 keys and quotes the JWKs.** All three identities are Ed25519 `did:key`s. Each JWK is written in single quotes so `node --env-file` reads the JSON verbatim. The file is created with mode 600, and the script refuses to overwrite an existing `.env`.
 
 **Paid responses are not cached.** The `200` with a resource carries `Cache-Control: no-store`, like the `402`, because the content was paid for by one caller.
+
+**The client compares the unsigned request after schema parsing.** The `402` body is parsed with the ACK payment request schema, then compared with the verified token payload as JSON, ignoring key order and absent keys. Any other difference (an amount, a payment service URL, the description) fails `payment_request_mismatch` before anything is paid. Rejected: comparing raw JSON text, which fails on harmless key order.
+
+**The approval wait is counted in poll intervals.** The client sleeps `intervalMs` between polls and gives up once the intervals add up to `timeoutMs`, rather than reading the clock; the timers are what an abort cancels, so polling stops at once. Rejected: comparing clock readings, which ties the timeout to how the clock and the timers are driven.
+
+**The client checks that the payment service answers about its own payment.** A `PaymentView` for another option, request, payer or network is `http_error`. A repeated initiation that finds the payment `settled` goes straight to the receipt; `failed` ends the run `payment_failed`. A receipt route that answers anything but `200` is `http_error`; the client does not retry it.
+
+**The page's receipt panel shows what the agent verified.** `client.receipt.verified` carries the issuer, payer, option and expiry that `verifyPaymentReceipt` returned, and the page renders the receipt from that event. The panel therefore appears in the same update as the run's progress, and shows only checked values. Rejected: decoding the JWT again in the page, which would be asynchronous and unchecked.
+
+**One client agent per run.** Each Fetch builds a new `PaywallClient` with its own event log, so a run's timeline holds only its own events. Fetch buttons are disabled while a run is in progress; Reset aborts the run and clears the page. The browser identity is loaded once at startup.
+
+**The browser bundle needs no polyfill.** `vite build` bundles `agentcommercekit` 0.11.0 and its key, DID and JWT libraries for the browser without `Buffer` or `process` shims; the built page completes a sandbox purchase in Chrome. The bundle is about 540 kB (176 kB gzipped), over Vite's 500 kB advisory limit; it is left as one chunk because the page needs the ACK code before it can do anything. Rejected: code splitting for no load-time gain.
+
+**A stored client key that is not an Ed25519 private JWK is replaced.** The page then generates a new identity rather than failing to start; the old DID is lost, which costs nothing because no state is tied to it.

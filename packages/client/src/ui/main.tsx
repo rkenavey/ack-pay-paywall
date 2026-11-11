@@ -3,6 +3,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { systemClock } from "@paywall/protocol"
 import { App } from "./App.tsx"
+import "./styles.css"
 import { loadBrowserIdentity } from "./identity.ts"
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787"
