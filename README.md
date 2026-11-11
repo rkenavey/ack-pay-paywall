@@ -12,7 +12,8 @@ The wire contract is in [docs/protocol.md](docs/protocol.md).
 
 - The workspace: install, typecheck, lint and the test runner.
 - The wire contract package `@paywall/protocol`: types and schemas for every body, the protocol events, money helpers, and the clock and id interfaces. Its tests pass.
-- The test suite for every part of the system, and the testkit it uses. Only the protocol tests pass so far; the others fail until the code they test is built.
+- The spend policy (`packages/server/src/policy`): an allowlist of payees and a human-approval threshold, with its configuration parser. Its tests pass. See [docs/policy.md](docs/policy.md).
+- The test suite for every part of the system, and the testkit it uses. The protocol and policy tests pass; the others fail until the code they test is built.
 - The server and client packages exist with their interfaces in place; their behaviour is not built yet, so neither the server nor the page runs.
 
 ## Prerequisites
@@ -65,5 +66,6 @@ tests/stripe-live/         the live Stripe test-mode check
 ## Documentation
 
 - [docs/protocol.md](docs/protocol.md): every route, body, error code and event.
+- [docs/policy.md](docs/policy.md): the spend policy's rules, examples and configuration.
 - [docs/testing.md](docs/testing.md): running the tests, how they are organised, the acceptance IDs and the testkit.
 - [docs/decisions.md](docs/decisions.md): choices made along the way and why.

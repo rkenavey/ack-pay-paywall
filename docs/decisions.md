@@ -12,8 +12,6 @@ Choices that were left open, newest last.
 
 **Shared runtime interfaces live in the protocol package.** `AgentIdentity`, `Clock`, `IdGenerator`, the system clock and random ids, and `PolicyDecision` are used by both the server and the client, and the client cannot import the server. The protocol package holds them; the server re-exports the types `AgentIdentity`, `Clock` and `IdGenerator` from its server-agent module and `PolicyDecision` from its policy module. The system clock and random ids are the only code that reads the time or randomness.
 
-**The policy module has its own stub error.** The policy may import only types from the protocol package, so its placeholder error class is local rather than the shared `NotImplementedError`.
-
 **The testkit and the server depend on each other.** The fake Stripe gateway implements the server's `StripeGateway` type, and the server's tests use the testkit. The import from the server is type-only, so nothing loads in a cycle, but `pnpm -r` refuses the cycle; the root `build` script therefore filters to the client.
 
 **Tests freeze the system clock.** ACK stamps and checks credentials and JWTs with the system time, not an injected clock. `useFixedTime` fakes `Date` at the injected clock's instant so a receipt "expired by the fixed clock" is expired for ACK too.
@@ -33,3 +31,7 @@ Choices that were left open, newest last.
 **`createStripeCheckout({ returnUrl })` and `StripePaymentForm`.** The browser Stripe executor is split into a checkout object, whose `executor` the client agent runs, and a React component that renders the Payment Element for it. The executor resolves when `confirmPayment` succeeds in the component, so the agent core stays free of React and Stripe.
 
 **`ApproverPanel({ paymentServiceUrl, fetch })`.** The approver panel is a self-contained component with its own "Human approver" region; it keeps the approver token in component state and calls the approver routes with it.
+
+**The policy fails closed on malformed input with an existing rule.** `evaluateSpend` must never throw, and the decision type has no "malformed" rule. A request without a usable amount is denied `invalid_amount`, a configuration without a usable threshold `currency_not_supported` (no denomination can match it), one without an allowlist `counterparty_not_allowed`; anything else that throws is caught and denied `invalid_amount`. Rejected: adding a rule name to the shared decision type.
+
+**Policy configuration parsing is lenient on whitespace, strict on values.** Whitespace around allowlist entries and empty entries (a trailing comma) are ignored, and an empty threshold variable means the default, so a blank line copied from `.env.example` works. DIDs must match the DID syntax `did:<method>:<id>`, and the threshold must be a whole number of cents; zero is refused, because the threshold is a `Money` and amounts are positive. Rejected: treating an empty entry or an empty threshold as an error, and allowing a zero threshold.
