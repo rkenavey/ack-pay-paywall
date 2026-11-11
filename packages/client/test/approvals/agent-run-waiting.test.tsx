@@ -1,7 +1,7 @@
 import { act, fireEvent, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { elapse, type FixedClock } from "@paywall/testkit"
-import { catalogItem, renderApp } from "../ui/render-app.tsx"
+import { renderApp } from "../ui/render-app.tsx"
 
 afterEach(() => {
   vi.useRealTimers()
@@ -25,7 +25,12 @@ async function until(condition: () => boolean, clock: FixedClock): Promise<void>
 async function startReport() {
   const app = renderApp({ fakeTimers: true, approvalPoll: { intervalMs: 1000, timeoutMs: 300_000 } })
   await until(() => within(app.catalog()).queryByText("Annual report") !== null, app.clock)
-  const item = await catalogItem(app.catalog(), "Annual report")
+  // spec-fix(T6): catalogItem awaits findByText, whose async wrapper waits on a setTimeout(0) that never fires under
+  // fake timers, so the test hung whatever the page did. until() has already seen the title; look the item up synchronously.
+  const item = within(app.catalog())
+    .getAllByRole("listitem")
+    .find((li) => within(li).queryByText("Annual report") !== null)
+  if (!item) throw new Error("no catalog item for Annual report")
   fireEvent.click(within(item).getByRole("button", { name: /fetch/i }))
   await until(() => /awaiting_approval/i.test(app.status().textContent ?? ""), app.clock)
   return app

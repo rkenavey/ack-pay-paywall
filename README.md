@@ -13,9 +13,10 @@ The wire contract is in [docs/protocol.md](docs/protocol.md).
 - The workspace: install, typecheck, lint and the test runner.
 - The wire contract package `@paywall/protocol`: types and schemas for every body, the protocol events, money helpers, and the clock and id interfaces. Its tests pass.
 - The spend policy (`packages/server/src/policy`): an allowlist of payees and a human-approval threshold, with its configuration parser. Its tests pass. See [docs/policy.md](docs/policy.md).
-- The server (`packages/server`): the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for approval, settles on the sandbox network and signs ACK receipts. `pnpm setup:env` writes a working `.env`, and the server logs one line per protocol event. Its tests pass. See [docs/server.md](docs/server.md).
+- The server (`packages/server`): the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for a human, settles on the sandbox network and signs ACK receipts. `pnpm setup:env` writes a working `.env`, and the server logs one line per protocol event. Its tests pass. See [docs/server.md](docs/server.md).
 - The client (`packages/client`): the client agent verifies the `402`, signs a payment initiation, pays on the sandbox network, verifies the receipt and retries once; it waits while a payment needs approval. The page lists both catalogs, shows every step of a run with the decoded payment request and receipt, and writes each event to the browser console. Its identity is an Ed25519 `did:key` kept in `localStorage`. See [docs/client.md](docs/client.md) and [docs/architecture.md](docs/architecture.md).
-- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server, client agent, page and in-process end-to-end tests pass; the Stripe, approval and over-HTTP tests fail until the code they test is built.
+- Human approval: the approver routes on the payment service, guarded by the approver token, and a *Human approver* panel on the page that lists waiting payments and approves or rejects them. Approving starts settlement and the waiting run completes; rejecting ends it `approval_rejected`. See [docs/approvals.md](docs/approvals.md).
+- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server, client agent, page, approval and in-process end-to-end tests pass; the Stripe tests fail until the Stripe option is built, and the over-HTTP sandbox case fails only its count of responses.
 
 ## Prerequisites
 
@@ -54,7 +55,7 @@ Open http://localhost:5173. The page shows the client agent's DID and the catalo
 
 - **Market brief** ($5.00, Acme). The run goes `requesting`, `verifying_request`, `selecting_option`, `initiating`, `paying`, `fetching_receipt`, `retrying`, `delivered`. The page shows the payment request (payee, amount, the `sandbox-usd` option marked as selected), the verified receipt (issuer, payer, option, expiry) and the content.
 - **Partner feed** ($5.00, Globex). Globex is not on the allowlist, so the payment service refuses before anything is paid: the run fails `policy_denied` with rule `counterparty_not_allowed`.
-- **Annual report** ($75.00, Acme). Over the $50 approval threshold: the run stops at `awaiting_approval`, waiting for a human. Approving is not built yet, so the run fails `approval_timeout` after five minutes; Reset ends it sooner.
+- **Annual report** ($75.00, Acme). Over the $50 approval threshold: the run stops at `awaiting_approval`, waiting for a human. In the *Human approver* panel, paste `APPROVER_TOKEN` from `.env`, press *Load approvals*, and press *Approve*: the run pays and ends `delivered`. Press *Reject* instead and it ends `approval_rejected`. Nobody deciding within five minutes ends it `approval_timeout`. See [docs/approvals.md](docs/approvals.md).
 
 The timeline lists every client event; the browser console shows the same events, and the server terminal prints the server agent and payment service events for the same payment request id ([docs/server.md](docs/server.md) explains the lines).
 
@@ -86,6 +87,7 @@ tests/stripe-live/         the live Stripe test-mode check
 - [docs/policy.md](docs/policy.md): the spend policy's rules, examples and configuration.
 - [docs/server.md](docs/server.md): the server agents and the payment service, their routes, configuration and log.
 - [docs/client.md](docs/client.md): the client agent's flow, the page, and how the agent's identity is stored.
+- [docs/approvals.md](docs/approvals.md): the human approver, the approver routes and the panel.
 - [docs/architecture.md](docs/architecture.md): the roles, who holds which key, and the sequence mapped to code and events.
 - [docs/testing.md](docs/testing.md): running the tests, how they are organised, the acceptance IDs and the testkit.
 - [docs/decisions.md](docs/decisions.md): choices made along the way and why.

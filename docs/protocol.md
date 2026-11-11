@@ -64,10 +64,10 @@ Mounted at `/payment-service`.
 | `POST /payments/:id/sandbox/settle` | `200 PaymentView` in `settled`. `409 payment_not_payable` unless the payment is a sandbox payment in `requires_payment`. |
 | `POST /payments/:id/receipt` | `200 { "receipt": "<JWT>" }`. Asking again returns the same JWT. `409 payment_not_settled` or `settlement_mismatch`. `404 payment_not_found`. |
 | `POST /webhooks/stripe` | `200`. `400 webhook_signature_invalid`. `503 webhook_not_configured`. |
-| `GET /approvals?status=pending` | `200 { "approvals": ApprovalView[] }`. `401 unauthorized`. |
-| `POST /approvals/:id/decision` | Body `{ "decision": "approve" \| "reject", "note"?: string }`. `200 ApprovalView`. `401 unauthorized`. `404 approval_not_found`. `409 approval_already_decided`. `410 payment_request_expired`. |
+| `GET /approvals?status=pending` | `200 { "approvals": ApprovalView[] }`. `400 invalid_request` for an unknown status. `401 unauthorized`. |
+| `POST /approvals/:id/decision` | Body `{ "decision": "approve" \| "reject", "note"?: string }`. `200 ApprovalView`. `400 invalid_request` for a malformed body. `401 unauthorized`. `404 approval_not_found`. `409 approval_already_decided`. `410 payment_request_expired`. |
 
-The approver routes require `Authorization: Bearer <approver token>`. CORS on both services allows only the client origin and the headers `Content-Type`, `Authorization` and `Payment-Receipt`.
+The approver routes require `Authorization: Bearer <approver token>` and are described in [approvals.md](approvals.md). CORS on both services allows only the client origin and the headers `Content-Type`, `Authorization` and `Payment-Receipt`.
 
 ### The initiation
 
@@ -136,4 +136,4 @@ In the order they happen on a paid request:
 | Retry and delivery | `client.request.retried`, `server.receipt.presented`, `server.receipt.verified`, `server.resource.delivered`, `client.resource.received` |
 | Failures | `server.receipt.rejected`, `ps.settlement.failed`, `client.flow.failed` |
 
-The prefix names the actor: `client.` the client agent, `server.` a server agent, `ps.` the payment service. `EVENT_LABELS` gives each a readable label.
+The prefix names the service that emits the event: `client.` the client agent, `server.` a server agent, `ps.` the payment service. The `actor` field matches the prefix except for `ps.approval.decided`, whose actor is `human`: the person made the decision and the payment service recorded it. `EVENT_LABELS` gives each a readable label.
