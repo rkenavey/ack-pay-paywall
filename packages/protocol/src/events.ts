@@ -78,7 +78,7 @@ export const EVENT_LABELS: Readonly<Record<EventName, string>> = {
   "ps.payment.initiated": "Payment service received the initiation",
   "ps.policy.evaluated": "Payment service evaluated the spend policy",
   "ps.approval.requested": "Payment service asked a human to approve",
-  "client.approval.waiting": "Client is waiting for a human approver",
+  "client.approval.waiting": "Client paused until the approver decides",
   "ps.approval.decided": "A human decided on the payment",
   "ps.settlement.started": "Payment service started settlement",
   "client.payment.executing": "Client is paying",

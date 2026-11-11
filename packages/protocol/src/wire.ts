@@ -57,6 +57,7 @@ export type PaymentServiceErrorCode =
   | "webhook_signature_invalid"
   | "webhook_not_configured"
   | "unauthorized"
+  | "invalid_request"
   | "approval_not_found"
   | "approval_already_decided"
 

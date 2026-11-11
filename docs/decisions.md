@@ -73,3 +73,15 @@ Choices that were left open, newest last.
 **The browser bundle needs no polyfill.** `vite build` bundles `agentcommercekit` 0.11.0 and its key, DID and JWT libraries for the browser without `Buffer` or `process` shims; the built page completes a sandbox purchase in Chrome. The bundle is about 540 kB (176 kB gzipped), over Vite's 500 kB advisory limit; it is left as one chunk because the page needs the ACK code before it can do anything. Rejected: code splitting for no load-time gain.
 
 **A stored client key that is not an Ed25519 private JWK is replaced.** The page then generates a new identity rather than failing to start; the old DID is lost, which costs nothing because no state is tied to it.
+
+**`ps.approval.decided` has the actor `human`.** The person holding the approver token made the decision; the payment service only records it. The event keeps its `ps.` name because the payment service emits it, and the log line reads `human ps.approval.decided`. Rejected: `payment-service` as the actor, which would hide who decided.
+
+**The approver token is compared as SHA-256 digests with `timingSafeEqual`.** Hashing first makes both sides the same length, so the comparison takes the same time whatever was sent, including its length. The header must be exactly `Bearer <token>`; an empty configured token authorizes nobody. A `WWW-Authenticate: Bearer` header goes with every `401`.
+
+**Malformed approver input answers `400 invalid_request`.** The contract named no code for a decision body that is not `approve` or `reject`, or a `status` filter that is not an approval status, so one code was added to the payment service error codes. Rejected: treating a bad body as `approve`, or silently ignoring an unknown filter.
+
+**Approving calls `begin` before changing the status.** The approval's atomic decide ensures only one request gets this far; the adapter's `begin` then runs once while the payment is still `pending_approval`, and one compare-and-set moves it to `requires_payment` with its `next`. A payment is therefore never `requires_payment` without a next action. If `begin` throws, the payment fails and the decision stays recorded.
+
+**An approval whose request expired is failed, not decided.** Approvals have no `expired` status, so a decision after expiry answers `410` and fails the payment, leaving the approval `pending` but unlisted; listing pending approvals fails and hides any whose request has expired, so the waiting client stops on its next poll. Rejected: recording a "rejected" decision nobody made.
+
+**The approver panel is part of the page but not of the agent.** The page renders it as its own *Human approver* region, pointed at `<API base URL>/payment-service`; it keeps the token in component state, refreshes its list every three seconds once loaded, and drops the token when the server answers `401`. The `client.approval.waiting` label became "Client paused until the approver decides", so the timeline does not keep saying the run is waiting for a human after the human has decided.

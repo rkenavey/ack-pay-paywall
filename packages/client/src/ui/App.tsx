@@ -20,6 +20,7 @@ import {
   type FlowState,
   type PaymentExecutor,
 } from "../agent/index.ts"
+import { ApproverPanel } from "../approver/index.tsx"
 
 /**
  * What the page needs. `apiBaseUrl` is the server origin; the page lists the
@@ -90,9 +91,9 @@ function logToConsole(event: ProtocolEvent): void {
 }
 
 /**
- * The client page: the catalog of both server agents and the agent run
+ * The client page: the catalog of both server agents, the agent run
  * (status, event timeline, decoded payment request and receipt, and the
- * delivered content or the failure).
+ * delivered content or the failure) and the human approver's panel.
  */
 export function App(props: AppProps): ReactElement {
   const { apiBaseUrl, fetch: fetchFn, identity, resolver, clock } = props
@@ -244,6 +245,8 @@ export function App(props: AppProps): ReactElement {
           </div>
         )}
       </section>
+
+      <ApproverPanel paymentServiceUrl={`${apiBaseUrl}/payment-service`} fetch={fetchFn} />
     </main>
   )
 }

@@ -103,11 +103,11 @@ The other outcomes from the same run:
 | :- | :- |
 | The same initiation again | `200`, the same payment |
 | `partner-feed` from Globex | `403 {"error":{"code":"policy_denied",…,"details":{"rule":"counterparty_not_allowed"}}}`; nothing is stored |
-| `annual-report` ($75.00) | `202`, `"status":"pending_approval"`, an `approvalId`, no `next`; nothing is paid |
+| `annual-report` ($75.00) | `202`, `"status":"pending_approval"`, an `approvalId`, no `next`; nothing is paid until the approver decides |
 | `{"initiation":"not-a-jwt"}` | `400 invalid_initiation` |
 | `GET /payment-service/payments/pay_nope` | `404 payment_not_found` |
 
-A payment waiting for approval stays in `pending_approval`: the settle route and the receipt route both answer 409 for it.
+A payment waiting for approval stays in `pending_approval` until the human approver decides through `GET /payment-service/approvals` and `POST /payment-service/approvals/:id/decision` ([approvals.md](approvals.md)); until then the settle route and the receipt route both answer 409 for it.
 
 Then the client pays and asks for the receipt:
 
@@ -120,6 +120,10 @@ $ curl -s -X POST http://localhost:8787/payment-service/payments/$PAY/receipt   
 ```
 
 The sandbox settle call records the payment in an in-memory ledger. The receipt route checks that ledger itself before it signs anything. The receipt is a `PaymentReceiptCredential` for the payer that expires `RECEIPT_TTL_SECONDS` after settlement. It is signed once, and asking again returns the same JWT. Settling twice answers `409 payment_not_payable`, and so does settling after the payment request has expired, which also moves the payment to `failed`. `POST /payment-service/webhooks/stripe` answers `503 webhook_not_configured` while no webhook secret is configured.
+
+### Approver routes
+
+`GET /payment-service/approvals?status=pending` and `POST /payment-service/approvals/:id/decision` need `Authorization: Bearer <APPROVER_TOKEN>` and answer `401 unauthorized` without it. Approving calls the payment's settlement adapter once and moves it to `requires_payment`; rejecting moves it to `rejected`. Examples, the error codes and what expiry does are in [approvals.md](approvals.md).
 
 ## CORS
 
@@ -168,5 +172,7 @@ One line per protocol event: the UTC time, the actor, the event, then `pr=` (pay
 9. Acme logs the receipt (by its tail) before checking it.
 10. The receipt verifies, and its payment request was issued here for this resource.
 11. Acme delivers the content and marks the request redeemed. Presenting the receipt again logs `server.receipt.rejected … code=receipt_already_redeemed`, and Acme issues a fresh payment request.
+
+For a payment that needs a human, `ps.policy.evaluated` reads `outcome=needs_approval rule=amount_over_threshold`, then come `ps.approval.requested` and, once the approver decides, `ps.approval.decided` with the actor `human` ([approvals.md](approvals.md) shows the lines).
 
 With `LOG_FORMAT=json` each line is the event as one JSON object: `name`, `actor`, `at`, `paymentRequestId`, `paymentId`, `data`.

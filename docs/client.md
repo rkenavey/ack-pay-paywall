@@ -33,7 +33,7 @@ The page talks to `VITE_API_BASE_URL` (default `http://localhost:8787`). `pnpm b
 | `verifying_request` | Got a `402`, checking the payment request. |
 | `selecting_option` | Choosing an option. |
 | `initiating` | Sending the signed initiation. |
-| `awaiting_approval` | The payment service is waiting for a human. |
+| `awaiting_approval` | The payment service is waiting for a human to approve or reject the payment in the approver panel. |
 | `paying` | The executor is paying. |
 | `fetching_receipt` | Asking for and verifying the receipt. |
 | `retrying` | Presenting the receipt. |
@@ -64,6 +64,7 @@ Each step emits a `client.*` event (see [protocol.md](protocol.md#events)); a fa
   - the *Payment request* once verified: payee DID, description, amount, request id, expiry, and every option with the selected one marked;
   - the *Receipt* once verified: issuer, payer, option, expiry and the token's last 8 characters;
   - the delivered content, or the failure code, its message and any details such as the policy rule.
+- **Human approver.** A field for the approver token, a *Load approvals* button, and the payments waiting for a human with amount, description, payer, payee and request time, each with *Approve* and *Reject*. The list refreshes every three seconds once loaded; errors such as a refused token appear in an alert. This panel is the human's, not the agent's: the token stays in the panel's memory and never reaches the client agent. See [approvals.md](approvals.md).
 
 Every event is also written to the browser console as `[paywall] <time> <actor> <event> pr=… pay=…`, followed by the event object.
 

@@ -27,6 +27,7 @@ import {
   type PolicyDecision,
   type ReceiptBody,
 } from "@paywall/protocol"
+import { createApproverRoutes } from "./approvals/index.ts"
 import type { PaymentRecord, PaymentServiceDeps, SandboxAdapter, SettlementAdapter, SettlementResult, StripeGateway } from "./types.ts"
 
 /** The payment service types: payments, stores, settlement adapters, the Stripe gateway seam and approvals. */
@@ -175,6 +176,8 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     }
     return c.json({ received: true })
   })
+
+  app.route("/approvals", createApproverRoutes({ deps, adapter: (network) => adapters.get(network), fail }))
 
   // ---------------------------------------------------------------------------
 

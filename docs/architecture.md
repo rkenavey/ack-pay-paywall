@@ -20,7 +20,7 @@ Browser (Vite, :5173)                     Node process (:8787)
 | Acme server agent | `packages/server/src/server-agent` at `/api` | `did:key` | `ACME_AGENT_JWK` in `.env` | payment requests |
 | Globex server agent | the same code at `/partner` | `did:key` | `GLOBEX_AGENT_JWK` in `.env` | payment requests |
 | Payment service, also the receipt service | `packages/server/src/payment-service` | `did:key` | `PAYMENT_SERVICE_JWK` in `.env` | receipts |
-| Human approver | no routes or panel yet | none | would hold the approver token (`APPROVER_TOKEN` in `.env`); the client never has it | nothing |
+| Human approver | `packages/client/src/approver` (panel), `packages/server/src/payment-service/approvals` (routes) | none: a bearer token, `APPROVER_TOKEN` | `.env` on the server; the person pastes it into the panel, which keeps it in memory only. The client agent never has it | nothing; decides payments over the threshold |
 
 Who trusts whom:
 
@@ -32,7 +32,7 @@ Every DID is a `did:key`, so everything verifies offline, including in the brows
 
 ## The sequence
 
-Each arrow is an HTTP call; the notes name the code and the events it emits. A payment over $50 waits at step 4. The approver routes are not built yet, so today nothing decides it and the client gives up when its poll times out. A payee off the allowlist gets `403 policy_denied` at step 4 and nothing is paid.
+Each arrow is an HTTP call; the notes name the code and the events it emits. A payment over $50 waits at step 4 until the human approver decides it in the approver panel ([approvals.md](approvals.md)); the client polls meanwhile and gives up after five minutes. A payee off the allowlist gets `403 policy_denied` at step 4 and nothing is paid.
 
 ```mermaid
 sequenceDiagram
@@ -40,6 +40,7 @@ sequenceDiagram
     participant C as Client agent<br/>client/src/agent/client.ts
     participant S as Server agent<br/>server/src/server-agent
     participant P as Payment service<br/>server/src/payment-service
+    participant H as Human approver<br/>client/src/approver
 
     C->>S: GET /api/resources/:id (no receipt)
     Note over C,S: 1. client.request.sent, server.request.received
@@ -54,8 +55,10 @@ sequenceDiagram
         loop every second
             C->>P: GET /payments/:id
         end
+        H->>P: POST /payment-service/approvals/:id/decision (Bearer approver token)
+        Note over H,P: ps.approval.decided (actor human)<br/>approve: adapter.begin, then requires_payment; reject: the run ends approval_rejected
     end
-    P-->>C: 201 requires_payment, next = sandbox_settle
+    P-->>C: requires_payment, next = sandbox_settle (201, or the poll after approval)
     Note over P: 5. ps.settlement.started (adapter.begin)
     C->>P: POST /payments/:id/sandbox/settle
     Note over C,P: client.payment.executing (sandbox executor)<br/>ps.settlement.confirmed (settle, adapter.verify)
@@ -73,8 +76,8 @@ sequenceDiagram
 | 1. Request | `fetchPaid`, first `GET` | `GET /resources/:id` | |
 | 2. Payment request | `verifyPaymentRequestToken`, mismatch and expiry checks | `paymentRequired`: `createSignedPaymentRequest`, saved to the request store | |
 | 3. Select and initiate | `selectOption`, `createJwt`, `POST /payments` | | `initiate`: verify initiation and token, check the option |
-| 4. Negotiation | `waitForDecision` polls while `pending_approval`; `403` ends the run `policy_denied` | | `evaluateSpend`; `deny` answers `403`, `needs_approval` holds the payment as `pending_approval` |
-| 5. Execution | the executor for the network (`createSandboxExecutor`) | | `begin` when the policy allows; `settle` on the settle route |
+| 4. Negotiation | `waitForDecision` polls while `pending_approval`; `403` ends the run `policy_denied` | | `evaluateSpend`; `deny` answers `403`, `needs_approval` holds the payment as `pending_approval` until `createApproverRoutes` records the human's decision |
+| 5. Execution | the executor for the network (`createSandboxExecutor`) | | `begin` when the policy allows or the human approves; `settle` on the settle route |
 | 6. Receipt generation | | | `issue`: `createPaymentReceipt`, `signCredential`, once per payment |
 | 7. Receipt delivery | `verifyReceipt`: issuer, token, option and subject | | `POST /payments/:id/receipt` |
 | 8. Present receipt | retry with `Payment-Receipt` | `checkReceipt`: `verifyPaymentReceipt`, issued here, right resource, known option, `redeem` | |
