@@ -1,0 +1,16 @@
+{
+  "name": "@paywall/testkit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@paywall/protocol": "workspace:*",
+    "@paywall/server": "workspace:*",
+    "agentcommercekit": "0.11.0",
+    "valibot": "1.4.1",
+    "vitest": "5.1.0"
+  }
+}

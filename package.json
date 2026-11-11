@@ -1,0 +1,36 @@
+{
+  "name": "ack-pay-paywall",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint --max-warnings 0 .",
+    "test": "vitest run",
+    "test:stripe-live": "vitest run --config vitest.live.config.ts",
+    "build": "pnpm --filter @paywall/client build",
+    "dev": "concurrently --names server,client --prefix-colors blue,magenta \"pnpm --filter @paywall/server dev\" \"pnpm --filter @paywall/client dev\"",
+    "setup:env": "node scripts/setup-env.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@hono/node-server": "2.1.6",
+    "@paywall/client": "workspace:*",
+    "@paywall/protocol": "workspace:*",
+    "@paywall/server": "workspace:*",
+    "@paywall/testkit": "workspace:*",
+    "@types/node": "26.6.6",
+    "agentcommercekit": "0.11.0",
+    "concurrently": "10.0.7",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.2",
+    "valibot": "1.4.1",
+    "vitest": "5.1.0"
+  }
+}
