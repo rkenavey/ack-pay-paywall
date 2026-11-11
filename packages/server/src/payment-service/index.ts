@@ -14,7 +14,6 @@ import {
   formatMoney,
   initiatePaymentBodySchema,
   MAX_INITIATION_LIFETIME_SECONDS,
-  NotImplementedError,
   paymentInitiationClaimsSchema,
   policyDecisionSchema,
   tokenTail,
@@ -28,7 +27,7 @@ import {
   type PolicyDecision,
   type ReceiptBody,
 } from "@paywall/protocol"
-import type { PaymentRecord, PaymentServiceDeps, SandboxAdapter, SettlementAdapter, SettlementResult } from "./types.ts"
+import type { PaymentRecord, PaymentServiceDeps, SandboxAdapter, SettlementAdapter, SettlementResult, StripeGateway } from "./types.ts"
 
 /** The payment service types: payments, stores, settlement adapters, the Stripe gateway seam and approvals. */
 export type * from "./types.ts"
@@ -99,6 +98,8 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   const emit = (event: Omit<Parameters<EventLog["emit"]>[0], "actor">) => log.emit({ ...event, actor: "payment-service" })
   // Receipt signing in flight per payment, so concurrent requests share one receipt.
   const issuing = new Map<string, Promise<JwtString>>()
+  // Stripe webhook event ids already handled, so a redelivery changes nothing.
+  const webhookEvents = new Set<string>()
 
   const app = new Hono()
 
@@ -148,11 +149,31 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     return c.json<ReceiptBody>({ receipt })
   })
 
-  app.post("/webhooks/stripe", (c) => {
-    if (!deps.stripe?.webhookConfigured) {
+  app.post("/webhooks/stripe", async (c) => {
+    const stripe = deps.stripe
+    if (!stripe?.webhookConfigured) {
       return refuse(c, new Refusal(503, "webhook_not_configured", "The Stripe webhook is not configured."))
     }
-    throw new NotImplementedError("T5")
+    // The signature covers the exact bytes Stripe sent, so read the body raw.
+    const rawBody = await c.req.text()
+    const signature = c.req.header("Stripe-Signature")
+    let event: ReturnType<typeof stripe.gateway.constructWebhookEvent>
+    try {
+      if (!signature) throw new Error("missing signature")
+      event = stripe.gateway.constructWebhookEvent(rawBody, signature)
+    } catch {
+      throw new Refusal(400, "webhook_signature_invalid", "The webhook signature does not verify.")
+    }
+    if (webhookEvents.has(event.id)) return c.json({ received: true })
+    webhookEvents.add(event.id)
+    try {
+      await handleStripeEvent(stripe.gateway, event)
+    } catch (error) {
+      // Let Stripe deliver it again later.
+      webhookEvents.delete(event.id)
+      throw error
+    }
+    return c.json({ received: true })
   })
 
   // ---------------------------------------------------------------------------
@@ -353,7 +374,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   /**
    * Checks settlement with the payment's adapter and, when the money has
    * arrived, moves the payment to `settled` with one compare-and-set. Called
-   * by the receipt route and the sandbox settle route.
+   * by the receipt route, the sandbox settle route and the Stripe webhook.
    */
   async function settle(paymentId: string): Promise<SettleOutcome> {
     const payment = await payments.get(paymentId)
@@ -389,6 +410,28 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     }
     if (result.reason === "failed") await fail(payment, result.detail ?? "The payment failed.")
     return { ok: false, refusal: notSettled }
+  }
+
+  /**
+   * Acts on a verified Stripe event. The event only says where to look: the
+   * PaymentIntent is retrieved from Stripe, and `settle` verifies it again
+   * through the adapter before anything moves to `settled`.
+   */
+  async function handleStripeEvent(gateway: StripeGateway, event: { type: string; paymentIntentId?: string }): Promise<void> {
+    if (event.type !== "payment_intent.succeeded" && event.type !== "payment_intent.payment_failed") return
+    if (!event.paymentIntentId) return
+    const intent = await gateway.retrievePaymentIntent(event.paymentIntentId)
+    const paymentId = intent.metadata.paymentId
+    if (!paymentId) return
+    const payment = await payments.get(paymentId)
+    if (!payment || payment.network !== "stripe" || payment.status !== "requires_payment") return
+    if (event.type === "payment_intent.succeeded") {
+      await settle(paymentId)
+      return
+    }
+    // Events can arrive out of order: never fail a payment Stripe now reports as succeeded.
+    if (intent.status === "succeeded") return
+    await fail(payment, "Stripe reported that the payment failed.")
   }
 
   /** Signs the receipt for a settled payment once, and returns the same JWT every time after. */

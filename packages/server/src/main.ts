@@ -28,8 +28,9 @@ export async function main(env: Record<string, string | undefined>): Promise<voi
     notice(`  Acme server agent      ${config.publicBaseUrl}/api      ${identityFromJwk(config.acmeAgentJwk).did}`)
     notice(`  Globex server agent    ${config.publicBaseUrl}/partner  ${identityFromJwk(config.globexAgentJwk).did}`)
     notice(`  Payment service        ${config.publicBaseUrl}/payment-service  ${identityFromJwk(config.paymentServiceJwk).did}`)
-    notice(`  Networks: ${config.sandboxNetwork ? "sandbox" : "none"}; CORS origin ${config.clientOrigin}`)
-    if (config.stripe) notice("  Stripe keys are set, but this build offers no Stripe option yet.")
+    const networks = [...(config.sandboxNetwork ? ["sandbox"] : []), ...(config.stripe ? ["stripe (test mode)"] : [])]
+    notice(`  Networks: ${networks.join(", ")}; CORS origin ${config.clientOrigin}`)
+    if (config.stripe) notice(`  Stripe webhook: ${config.stripe.webhookSecret ? "configured" : "not configured (receipts verify the PaymentIntent directly)"}`)
   })
 
   const stop = () => {

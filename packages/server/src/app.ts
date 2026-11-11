@@ -3,7 +3,8 @@ import { Hono, type MiddlewareHandler } from "hono"
 import { cors } from "hono/cors"
 import { randomIds, RECEIPT_HEADER, systemClock, type Clock, type ErrorBody, type EventLog, type IdGenerator } from "@paywall/protocol"
 import { createPaymentService, createSandboxAdapter } from "./payment-service/index.ts"
-import type { SettlementAdapter, StripeGateway } from "./payment-service/types.ts"
+import { createStripeAdapter, createStripeGateway } from "./payment-service/stripe/index.ts"
+import type { PaymentServiceDeps, SettlementAdapter, StripeGateway } from "./payment-service/types.ts"
 import { evaluateSpend } from "./policy/index.ts"
 import { createServerAgent } from "./server-agent/index.ts"
 import { ACME_CATALOG, GLOBEX_CATALOG } from "./shared/catalog.ts"
@@ -53,7 +54,8 @@ function corsFor(clientOrigin: string): MiddlewareHandler {
  * with its own identity, with CORS limited to `config.clientOrigin`.
  *
  * Without overrides it uses the system clock, random ids, the console event
- * log in `config.logFormat` and a `did:key` resolver. Throws when no payment
+ * log in `config.logFormat`, a `did:key` resolver and, when `config.stripe`
+ * is set, the real Stripe gateway. Stripe is offered only with keys. Throws when no payment
  * network can be offered.
  */
 export function buildApp(config: AppConfig, overrides: AppOverrides = {}): Hono {
@@ -69,8 +71,19 @@ export function buildApp(config: AppConfig, overrides: AppOverrides = {}): Hono 
 
   const adapters: SettlementAdapter[] = []
   if (config.sandboxNetwork) adapters.push(createSandboxAdapter())
+  let stripe: PaymentServiceDeps["stripe"]
+  if (config.stripe) {
+    const gateway =
+      overrides.stripeGateway ??
+      createStripeGateway({
+        secretKey: config.stripe.secretKey,
+        ...(config.stripe.webhookSecret === undefined ? {} : { webhookSecret: config.stripe.webhookSecret }),
+      })
+    adapters.push(createStripeAdapter({ gateway, publishableKey: config.stripe.publishableKey, clock }))
+    stripe = { gateway, webhookConfigured: config.stripe.webhookSecret !== undefined }
+  }
   const networks = adapters.map((adapter) => adapter.network)
-  if (networks.length === 0) throw new Error("no payment network is available: set SANDBOX_NETWORK=on")
+  if (networks.length === 0) throw new Error("no payment network is available: set SANDBOX_NETWORK=on or the Stripe keys")
 
   const agent = (identity: typeof acme, catalog: typeof ACME_CATALOG) =>
     createServerAgent({
@@ -94,6 +107,7 @@ export function buildApp(config: AppConfig, overrides: AppOverrides = {}): Hono 
     approvals: createMemoryApprovalStore(),
     approverToken: config.approverToken,
     receiptTtlSeconds: config.receiptTtlSeconds,
+    ...(stripe === undefined ? {} : { stripe }),
     resolver,
     clock,
     ids,
