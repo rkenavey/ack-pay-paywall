@@ -13,8 +13,9 @@ The wire contract is in [docs/protocol.md](docs/protocol.md).
 - The workspace: install, typecheck, lint and the test runner.
 - The wire contract package `@paywall/protocol`: types and schemas for every body, the protocol events, money helpers, and the clock and id interfaces. Its tests pass.
 - The spend policy (`packages/server/src/policy`): an allowlist of payees and a human-approval threshold, with its configuration parser. Its tests pass. See [docs/policy.md](docs/policy.md).
-- The test suite for every part of the system, and the testkit it uses. The protocol and policy tests pass; the others fail until the code they test is built.
-- The server and client packages exist with their interfaces in place; their behaviour is not built yet, so neither the server nor the page runs.
+- The server (`packages/server`): the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for approval, settles on the sandbox network and signs ACK receipts. `pnpm setup:env` writes a working `.env`, and the server logs one line per protocol event. Its tests pass. See [docs/server.md](docs/server.md).
+- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server agent and payment service tests pass; the others fail until the code they test is built.
+- The client package exists with its interfaces in place; its behaviour is not built yet, so the page does not run.
 
 ## Prerequisites
 
@@ -39,7 +40,7 @@ pnpm install
 | `pnpm dev` | Starts the server and the client together. |
 | `pnpm setup:env` | Writes a `.env` with fresh keys. |
 
-Until the server is built, `pnpm setup:env` stops with a "not implemented yet" error, and `pnpm dev` starts only the Vite dev server (the server process exits because there is no `.env` yet). `.env.example` documents every configuration variable.
+Run `pnpm setup:env` once before starting the server; it refuses to overwrite an existing `.env`. `pnpm --filter @paywall/server start` starts the server alone on port 8787 ([docs/server.md](docs/server.md) shows it in use with `curl`). `.env.example` documents every configuration variable.
 
 ## Repository layout
 
@@ -67,5 +68,6 @@ tests/stripe-live/         the live Stripe test-mode check
 
 - [docs/protocol.md](docs/protocol.md): every route, body, error code and event.
 - [docs/policy.md](docs/policy.md): the spend policy's rules, examples and configuration.
+- [docs/server.md](docs/server.md): the server agents and the payment service, their routes, configuration and log.
 - [docs/testing.md](docs/testing.md): running the tests, how they are organised, the acceptance IDs and the testkit.
 - [docs/decisions.md](docs/decisions.md): choices made along the way and why.

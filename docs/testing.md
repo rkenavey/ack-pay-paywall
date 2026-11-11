@@ -15,7 +15,7 @@ pnpm test:stripe-live                        # real Stripe test mode; needs STRI
 
 `pnpm test` runs the Vitest projects in `vitest.config.ts`. `pnpm test:stripe-live` uses `vitest.live.config.ts`, reads only the `STRIPE_*` variables from `.env`, and fails when they are missing. It is never part of `pnpm test`.
 
-Today the protocol and policy tests pass; the rest fail until the code they test is built:
+Today the protocol, policy, server agent and payment service tests pass; the rest fail until the code they test is built:
 
 ```
 $ pnpm exec vitest run packages/protocol/test
@@ -26,9 +26,13 @@ $ pnpm exec vitest run packages/server/test/policy
  Test Files  2 passed (2)
       Tests  21 passed (21)
 
+$ pnpm exec vitest run packages/server/test/server-agent packages/server/test/payment-service
+ Test Files  4 passed (4)
+      Tests  56 passed (56)
+
 $ pnpm test
- Test Files  18 failed | 6 passed (24)
-      Tests  143 failed | 105 passed | 3 skipped (251)
+ Test Files  14 failed | 10 passed (24)
+      Tests  84 failed | 167 passed (251)
 ```
 
 ## Layout
