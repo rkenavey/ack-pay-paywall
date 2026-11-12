@@ -15,7 +15,7 @@ pnpm test:stripe-live                        # real Stripe test mode; needs STRI
 
 `pnpm test` runs the Vitest projects in `vitest.config.ts`. `pnpm test:stripe-live` uses `vitest.live.config.ts`, reads only the `STRIPE_*` variables from `.env`, and fails when they are missing. It is never part of `pnpm test`.
 
-Today the protocol, policy, server agent, payment service, client agent, page, approval and in-process end-to-end tests pass. The Stripe tests fail until the Stripe option is built. In `tests/e2e/http` the approval and preflight cases pass; the sandbox case completes the purchase but fails its count of responses (it expects at least 6, the flow makes 5):
+Today the protocol, policy, server agent, payment service, client agent, page, Stripe, approval and in-process end-to-end tests pass, and so does the live Stripe check. In `tests/e2e/http` the approval and preflight cases pass; the sandbox case completes the purchase but fails its count of responses (it expects at least 6, the flow makes 5):
 
 ```
 $ pnpm exec vitest run packages/protocol/test
@@ -34,13 +34,21 @@ $ pnpm exec vitest run packages/client/test/agent packages/client/test/ui tests/
  Test Files  5 passed (5)
       Tests  39 passed (39)
 
+$ pnpm exec vitest run packages/server/test/stripe packages/client/test/stripe tests/e2e/stripe
+ Test Files  6 passed (6)
+      Tests  37 passed (37)
+
 $ pnpm exec vitest run packages/server/test/approvals packages/client/test/approvals tests/e2e/approval
  Test Files  4 passed (4)
       Tests  18 passed (18)
 
 $ pnpm test
- Test Files  5 failed | 19 passed (24)
-      Tests  26 failed | 225 passed (251)
+ Test Files  1 failed | 25 passed (26)
+      Tests  1 failed | 257 passed (258)
+
+$ pnpm test:stripe-live
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
 ```
 
 ## Layout
@@ -51,11 +59,11 @@ $ pnpm test
 | `packages/server/test/policy` | POL-1 to POL-7 | The spend policy and its configuration. |
 | `packages/server/test/server-agent` | SA-1 to SA-14 | 402 issuance, receipt verification, single use, CORS, server events. |
 | `packages/server/test/payment-service` | PS-1 to PS-13 | Initiation, policy enforcement, sandbox settlement, receipts, payment service events. |
-| `packages/server/test/stripe` | STR-1 to STR-8 | The Stripe adapter, webhook, configuration guards, secrets in logs. |
+| `packages/server/test/stripe` | STR-1 to STR-8 | The Stripe adapter, webhook, configuration guards, secrets in logs, and out-of-order webhook events. |
 | `packages/server/test/approvals` | APR-1 to APR-7 | The approver routes and decisions. |
 | `packages/client/test/agent` | CL-1 to CL-13 | The client agent core. |
 | `packages/client/test/ui` | UI-1 to UI-5 | The page, rendered in jsdom. |
-| `packages/client/test/stripe` | STR-9 | The Payment Element executor, with Stripe.js mocked. |
+| `packages/client/test/stripe` | STR-9 | The Payment Element executor, with Stripe.js mocked, and its abort and processing paths. |
 | `packages/client/test/approvals` | UI-6, UI-7 | The approver panel and the agent run while it waits. |
 | `tests/e2e/core`, `stripe`, `approval` | E2E-1 to E2E-6 | The real client core against the real server, in process. |
 | `tests/e2e/http` | E2E-7 | The server on a real ephemeral port, with real `fetch` and CORS. |

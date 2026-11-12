@@ -46,7 +46,7 @@ Read once at startup from the environment (`node --env-file=.env`). Each variabl
 | `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` | unset | Both keys or neither; test-mode keys only (`sk_test_`/`rk_test_`, `pk_test_`, `whsec_`). Live keys stop the process. |
 | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
 
-The server needs at least one payment network: `SANDBOX_NETWORK=off` without Stripe keys is refused. This server settles on the sandbox network, which moves no money.
+The server needs at least one payment network: `SANDBOX_NETWORK=off` without Stripe keys is refused. The sandbox network moves no money. With Stripe keys the server also offers a `stripe-usd` option settled through Stripe test mode; [stripe.md](stripe.md) covers the keys, the checks before a receipt and the webhook.
 
 ## Server agent routes
 
@@ -119,7 +119,7 @@ $ curl -s -X POST http://localhost:8787/payment-service/payments/$PAY/receipt   
 {"receipt":"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ0MjM2NDEsInZjIjp7…"}
 ```
 
-The sandbox settle call records the payment in an in-memory ledger. The receipt route checks that ledger itself before it signs anything. The receipt is a `PaymentReceiptCredential` for the payer that expires `RECEIPT_TTL_SECONDS` after settlement. It is signed once, and asking again returns the same JWT. Settling twice answers `409 payment_not_payable`, and so does settling after the payment request has expired, which also moves the payment to `failed`. `POST /payment-service/webhooks/stripe` answers `503 webhook_not_configured` while no webhook secret is configured.
+The sandbox settle call records the payment in an in-memory ledger. The receipt route checks that ledger itself before it signs anything. The receipt is a `PaymentReceiptCredential` for the payer that expires `RECEIPT_TTL_SECONDS` after settlement. It is signed once, and asking again returns the same JWT. Settling twice answers `409 payment_not_payable`, and so does settling after the payment request has expired, which also moves the payment to `failed`. For a Stripe payment the receipt route retrieves the PaymentIntent and signs only when it succeeded for the expected amount, currency and payment id; until then it answers `409 payment_not_settled`, and on a mismatch `409 settlement_mismatch`. `POST /payment-service/webhooks/stripe` verifies the `Stripe-Signature` header and settles or fails Stripe payments; it answers `503 webhook_not_configured` while no webhook secret is configured ([stripe.md](stripe.md#the-webhook)).
 
 ### Approver routes
 

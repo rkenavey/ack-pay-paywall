@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react"
 import type { Resolvable } from "agentcommercekit"
 import * as v from "valibot"
 import {
@@ -25,7 +25,9 @@ import { ApproverPanel } from "../approver/index.tsx"
 /**
  * What the page needs. `apiBaseUrl` is the server origin; the page lists the
  * catalogs of the server agents at `/api` and `/partner` under it.
- * `executors` defaults to the sandbox executor.
+ * `executors` defaults to the sandbox executor. `paymentPanel` is shown in
+ * the agent run while the agent pays over a network that needs the person at
+ * the browser, such as the Stripe Payment Element.
  */
 export interface AppProps {
   apiBaseUrl: string
@@ -35,6 +37,7 @@ export interface AppProps {
   clock: Clock
   executors?: readonly PaymentExecutor[]
   approvalPoll?: { intervalMs: number; timeoutMs: number }
+  paymentPanel?: ReactNode
 }
 
 const SERVER_AGENTS = [
@@ -212,6 +215,7 @@ export function App(props: AppProps): ReactElement {
         </ol>
 
         {flow.paymentRequired && <PaymentRequestView flow={flow} />}
+        {flow.status === "paying" && flow.selectedOption?.network === "stripe" && props.paymentPanel}
         <ReceiptView events={events} />
 
         {flow.resource && (

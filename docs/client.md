@@ -20,7 +20,7 @@ The page talks to `VITE_API_BASE_URL` (default `http://localhost:8787`). `pnpm b
 3. **Select an option.** Among the options on a network the agent has an executor for, `stripe` is preferred over `sandbox`.
 4. **Initiate.** The agent signs a JWT with its own DID (`aud` the option's `paymentService`, 300 s to expiry, claims `paymentRequestToken` and `paymentOptionId`) and POSTs it to `{paymentService}/payments`.
 5. **Wait for a human** if the payment is `pending_approval`: it polls `GET /payments/:id` every second for up to five minutes.
-6. **Pay.** For `requires_payment` it runs the executor for the network. The sandbox executor calls `POST /payments/:id/sandbox/settle`.
+6. **Pay.** For `requires_payment` it runs the executor for the network. The sandbox executor calls `POST /payments/:id/sandbox/settle`. The Stripe executor (`createStripeCheckout` in `src/stripe`) hands the client secret to the page, which mounts Stripe's Payment Element; it resolves once `stripe.confirmPayment` reports the payment succeeded, and rejects only when the run is aborted. Declines are shown in the form and can be retried. Either way the payment service checks settlement itself before it signs a receipt.
 7. **Receipt.** `POST /payments/:id/receipt`, then `verifyPaymentReceipt` with the option's `receiptService` as the only trusted issuer and the payee as the payment request issuer. The receipt must embed the token it paid, name the option it chose, and be issued to its own DID.
 8. **Retry** the original request once with `Payment-Receipt: <receipt>`. A second `402` ends the run.
 
@@ -62,6 +62,7 @@ Each step emits a `client.*` event (see [protocol.md](protocol.md#events)); a fa
 - **Agent run.** The current status in an `aria-live` region (it says "waiting for a human" while a payment awaits approval), the resource URL, a Reset button, and:
   - a *Timeline* with one row per event: UTC time, readable label and event name;
   - the *Payment request* once verified: payee DID, description, amount, request id, expiry, and every option with the selected one marked;
+  - while paying with Stripe, *Card payment (Stripe test mode)*: the Payment Element, a Pay button and Stripe's error message after a failed attempt ([stripe.md](stripe.md));
   - the *Receipt* once verified: issuer, payer, option, expiry and the token's last 8 characters;
   - the delivered content, or the failure code, its message and any details such as the policy rule.
 - **Human approver.** A field for the approver token, a *Load approvals* button, and the payments waiting for a human with amount, description, payer, payee and request time, each with *Approve* and *Reject*. The list refreshes every three seconds once loaded; errors such as a refused token appear in an alert. This panel is the human's, not the agent's: the token stays in the panel's memory and never reaches the client agent. See [approvals.md](approvals.md).
