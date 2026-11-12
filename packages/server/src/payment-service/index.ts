@@ -84,14 +84,15 @@ function toView(record: PaymentRecord): PaymentView {
 }
 
 /**
- * The public form of a payment, for a response. A payment in
- * `requires_payment` with no next action (settlement never started, and the
- * cancel of what it may have created is still outstanding) cannot be shown
- * without breaking the wire contract, so it answers `500` instead.
+ * The public form of a payment, for a response. Readers wait for settlement
+ * that is still starting, and a payment whose settlement could not start
+ * fails at once, so a stored payment is never in `requires_payment` without
+ * a next action when shown. Should that invariant ever break, the payment
+ * answers `500` rather than be shown as payable.
  */
 function view(record: PaymentRecord): PaymentView {
   if (record.status === "requires_payment" && !record.next) {
-    throw new Refusal(500, "internal_error", "Settlement for this payment could not be started; it cannot be paid.")
+    throw new Refusal(500, "internal_error", "Settlement for this payment is in an unknown state; it cannot be paid.")
   }
   return toView(record)
 }
@@ -127,10 +128,12 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   const issuing = new Map<string, Promise<JwtString>>()
   // Stripe webhook event ids already handled, so a redelivery changes nothing.
   const webhookEvents = new Set<string>()
-  // Settlement being started per payment, so failing a payment waits for the PaymentIntent it may create.
-  const beginning = new Map<string, Promise<NextAction>>()
-  // Payments to fail once their PaymentIntent cancel is confirmed. Each touch of one retries the cancel once.
-  const cancelOwed = new Map<string, { failure: string; reason: string }>()
+  // Settlement being started per payment, so failing or showing a payment waits for the PaymentIntent it may create.
+  const beginning = new Map<string, Promise<unknown>>()
+  // Payments whose next action was issued, to fail once their PaymentIntent cancel is confirmed. Each touch retries the cancel once.
+  const failureOwed = new Map<string, { failure: string; reason: string }>()
+  // Payments already failed or rejected whose PaymentIntent cancel is still outstanding, with why they ended. Each touch retries it once.
+  const cancelOwed = new Map<string, string>()
 
   const app = new Hono()
 
@@ -145,7 +148,9 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   })
 
   app.get("/payments/:id", async (c) => {
-    const payment = await payments.get(c.req.param("id"))
+    const id = c.req.param("id")
+    await started(id)
+    const payment = await payments.get(id)
     if (!payment) throw notFound()
     return c.json(view(payment))
   })
@@ -209,7 +214,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     return c.json({ received: true })
   })
 
-  app.route("/approvals", createApproverRoutes({ deps, begin: startWith, fail, touch, release }))
+  app.route("/approvals", createApproverRoutes({ deps, start: (record) => track(record.id, startNow(record)), fail, touch }))
 
   // ---------------------------------------------------------------------------
 
@@ -272,7 +277,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
 
     // 4. A repeat returns the payment already started, whatever its state.
     const existing = await payments.findByKey(payer, paymentRequest.id, option.id)
-    if (existing) return repeat(existing, payee)
+    if (existing) return await repeat(existing, payee)
 
     // 5. The policy, before any money moves.
     const spend = {
@@ -315,7 +320,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     if (decision.outcome === "needs_approval") {
       const approvalId = ids.next("apr")
       const stored = await store({ ...record, approvalId })
-      if (stored !== true) return repeat(stored, payee)
+      if (stored !== true) return await repeat(stored, payee)
       await approvals.create({ id: approvalId, paymentId, status: "pending", requestedAt: now })
       emit({
         name: "ps.approval.requested",
@@ -326,11 +331,17 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
       return { payment: (await payments.get(paymentId)) ?? { ...record, approvalId }, status: 202 }
     }
 
-    // 8. Allow: store it, then start settlement.
-    const stored = await store(record)
-    if (stored !== true) return repeat(stored, payee)
-    const begun = await begin(record)
-    // 201 promises a payment that can be paid; one that failed, or whose cancel is outstanding, stays stored for repeats.
+    // 8. Allow: store it, then start settlement. Both are tracked from before the store, so a
+    // concurrent read or repeat waits rather than see the payment before it has a next action.
+    const begun = await track(
+      paymentId,
+      (async () => {
+        const stored = await store(record)
+        return stored === true ? startNow(record) : stored
+      })(),
+    )
+    if (begun.id !== paymentId) return await repeat(begun, payee)
+    // 201 promises a payment that can be paid; one that failed stays stored, and a repeat answers 200 with it.
     if (begun.status !== "requires_payment" || !begun.next) throw new Refusal(500, "internal_error", "Settlement could not be started; the payment failed.")
     return { payment: begun, status: 201 }
   }
@@ -360,11 +371,12 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     return decision
   }
 
-  /** Answers a repeated initiation with the payment already started. */
-  function repeat(existing: PaymentRecord, payee: DidUri): { payment: PaymentRecord; status: 200 } {
+  /** Answers a repeated initiation with the payment already started, once any settlement it is starting has started or failed. */
+  async function repeat(existing: PaymentRecord, payee: DidUri): Promise<{ payment: PaymentRecord; status: 200 }> {
     // Request ids are only unique per issuer; never hand one payee's payment to another's request.
     if (existing.payee !== payee) throw new Refusal(400, "payment_request_invalid", "A different payment request with this id was already used.")
-    return { payment: existing, status: 200 }
+    await started(existing.id)
+    return { payment: (await payments.get(existing.id)) ?? existing, status: 200 }
   }
 
   /** Stores a new payment, or returns the one a concurrent initiation stored first. */
@@ -379,62 +391,99 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     }
   }
 
-  /** Starts settlement for a payment in `requires_payment` and records its next action. */
-  async function begin(record: PaymentRecord): Promise<PaymentRecord> {
-    let next
-    try {
-      next = await startWith(record)
-    } catch {
-      return fail(record, "Settlement could not be started.")
+  /**
+   * Records `work` as settlement being started for a payment until it
+   * finishes, so `fail`, reads and repeats of that payment wait for it. Call
+   * it in the same tick that starts `work`.
+   */
+  function track<T>(paymentId: string, work: Promise<T>): Promise<T> {
+    beginning.set(paymentId, work)
+    const done = () => {
+      if (beginning.get(paymentId) === work) beginning.delete(paymentId)
     }
-    if (await payments.transition(record.id, "requires_payment", { status: "requires_payment", next })) {
-      emit({ name: "ps.settlement.started", paymentRequestId: record.paymentRequestId, paymentId: record.id, data: { network: record.network, next: next.type } })
-    } else {
-      // The payment stopped being payable while settlement was starting.
-      await release(record)
-    }
-    return (await payments.get(record.id)) ?? { ...record, next }
+    work.then(done, done)
+    return work
+  }
+
+  /** Waits for settlement that is being started for a payment, whatever its outcome. */
+  async function started(paymentId: string): Promise<void> {
+    await beginning.get(paymentId)?.catch(() => undefined)
   }
 
   /**
    * Calls the payment's adapter `begin`, the only place money movement
-   * starts, and records the call as in flight until it settles. Throws when
-   * the network has no adapter or `begin` fails.
+   * starts, and moves the payment from its current status (`requires_payment`
+   * after initiation, `pending_approval` after an approval) to
+   * `requires_payment` with the next action, in one compare-and-set.
+   *
+   * When `begin` fails, or the network has no adapter, no next action was
+   * issued, so the payment fails at once and its cancel is attempted. When
+   * the payment stopped being payable while settlement was starting, what was
+   * started is released. Resolves with the payment as it now is. Not tracked:
+   * callers wrap it in `track`.
    */
-  async function startWith(record: PaymentRecord): Promise<NextAction> {
+  async function startNow(record: PaymentRecord): Promise<PaymentRecord> {
+    const from = record.status
     const adapter = adapters.get(record.network)
-    if (!adapter) throw new Error(`no adapter for the ${record.network} network`)
-    const started = adapter.begin(record)
-    beginning.set(record.id, started)
+    let next: NextAction
     try {
-      return await started
-    } finally {
-      if (beginning.get(record.id) === started) beginning.delete(record.id)
+      if (!adapter) throw new Error(`no adapter for the ${record.network} network`)
+      next = await adapter.begin(record)
+    } catch {
+      return failNow(record, "Settlement could not be started.", "failed")
     }
+    if (await payments.transition(record.id, from, { status: "requires_payment", next })) {
+      emit({ name: "ps.settlement.started", paymentRequestId: record.paymentRequestId, paymentId: record.id, data: { network: record.network, next: next.type } })
+    } else {
+      // The payment stopped being payable while settlement was starting; its next action was never shown.
+      await release(record)
+    }
+    return (await payments.get(record.id)) ?? record
   }
 
   /**
-   * Moves a payment that has not settled to `failed`. A Stripe payment moves
-   * only once its PaymentIntent cancel is confirmed, so a failed payment can
-   * never capture money later.
+   * Moves a payment that has not settled to `failed`, once any settlement
+   * being started for it has started or failed.
    *
-   * When the cancel is refused or errors, the payment keeps its status, the
-   * failure is owed, and `ps.settlement.failed` is logged with
-   * `reason=cancel_failed`; the next touch of the payment tries the cancel
-   * once more. A PaymentIntent that cannot be cancelled because it has
-   * succeeded wins: the payment is settled instead. Never throws for a
-   * cancel or verify error.
+   * A payment whose next action was issued (a client secret may have reached
+   * the browser) moves only once its PaymentIntent cancel is confirmed, so a
+   * failed payment can never capture money later. When that cancel is refused
+   * or errors, the payment keeps its status, the failure is owed, and
+   * `ps.settlement.failed` is logged with `reason=cancel_failed`; the next
+   * touch of the payment tries the cancel once more. A PaymentIntent that
+   * cannot be cancelled because it has succeeded wins: the payment is settled
+   * instead.
+   *
+   * A payment for which no next action was ever issued (still waiting for a
+   * human, or settlement never started) fails at once, because nobody holds
+   * the secret to pay its PaymentIntent; the cancel is still attempted, and a
+   * failed one is owed and retried on touch. Never throws for a cancel or
+   * verify error.
    */
   async function fail(record: PaymentRecord, failure: string, reason = "failed"): Promise<PaymentRecord> {
     // A PaymentIntent being created now must exist before it can be cancelled.
-    await beginning.get(record.id)?.catch(() => undefined)
-    const current = (await payments.get(record.id)) ?? record
+    await started(record.id)
+    return failNow(record, failure, reason)
+  }
+
+  /** `fail` without waiting for settlement that is being started; for that settlement's own failure. */
+  async function failNow(record: PaymentRecord, failure: string, reason: string): Promise<PaymentRecord> {
+    const current = await payments.get(record.id)
+    if (!current) return record
     const from = current.status
     if (from !== "requires_payment" && from !== "pending_approval") {
-      cancelOwed.delete(current.id)
+      failureOwed.delete(current.id)
       return current
     }
     const adapter = adapters.get(current.network)
+    if (from === "pending_approval" || !current.next) {
+      failureOwed.delete(current.id)
+      // Lost to a concurrent change: act on the payment as it now is.
+      if (!(await payments.transition(current.id, from, { status: "failed", failure, next: undefined }))) return failNow(current, failure, reason)
+      emit({ name: "ps.settlement.failed", paymentRequestId: current.paymentRequestId, paymentId: current.id, data: { network: current.network, reason } })
+      await cancelOrOwe(current, reason)
+      return (await payments.get(current.id)) ?? current
+    }
     if (isStripeAdapter(adapter)) {
       try {
         await adapter.cancel(current)
@@ -448,7 +497,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
           }
           if (result?.settled && (await confirm(current, result))) return (await payments.get(current.id)) ?? current
         }
-        cancelOwed.set(current.id, { failure, reason })
+        failureOwed.set(current.id, { failure, reason })
         emit({
           name: "ps.settlement.failed",
           paymentRequestId: current.paymentRequestId,
@@ -458,7 +507,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
         return (await payments.get(current.id)) ?? current
       }
     }
-    cancelOwed.delete(current.id)
+    failureOwed.delete(current.id)
     if (await payments.transition(current.id, from, { status: "failed", failure, next: undefined })) {
       emit({ name: "ps.settlement.failed", paymentRequestId: current.paymentRequestId, paymentId: current.id, data: { network: current.network, reason } })
     }
@@ -466,32 +515,50 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   }
 
   /**
-   * Retries an outstanding PaymentIntent cancel, once, for a payment that is
-   * owed a failure. Does nothing for any other payment. Called by every route
+   * Retries, once, an outstanding PaymentIntent cancel: for a payment owed a
+   * failure, through `fail`; for a payment already failed or rejected, the
+   * cancel alone. Does nothing for any other payment. Called by every route
    * that touches a payment: settle, the receipt route, the webhook and the
-   * approver routes.
+   * approver routes. Reading a payment is not a touch.
    */
   async function touch(record: PaymentRecord): Promise<PaymentRecord> {
-    const owed = cancelOwed.get(record.id)
-    return owed ? fail(record, owed.failure, owed.reason) : record
+    const owed = failureOwed.get(record.id)
+    if (owed) return fail(record, owed.failure, owed.reason)
+    const cause = cancelOwed.get(record.id)
+    if (cause === undefined) return record
+    await cancelOrOwe(record, cause)
+    return (await payments.get(record.id)) ?? record
   }
 
-  /** Cancels whatever settlement was started for a payment that is no longer payable. */
+  /**
+   * Cancels the PaymentIntent of a payment that has already ended. When the
+   * cancel is refused or errors, it is owed, `ps.settlement.failed` is logged
+   * with `reason=cancel_failed` and `cause`, and the next touch retries it.
+   * Never throws.
+   */
+  async function cancelOrOwe(record: PaymentRecord, cause: string): Promise<void> {
+    const adapter = adapters.get(record.network)
+    if (!isStripeAdapter(adapter)) return
+    try {
+      await adapter.cancel(record)
+    } catch {
+      cancelOwed.set(record.id, cause)
+      emit({
+        name: "ps.settlement.failed",
+        paymentRequestId: record.paymentRequestId,
+        paymentId: record.id,
+        data: { network: record.network, reason: "cancel_failed", cause },
+      })
+      return
+    }
+    cancelOwed.delete(record.id)
+  }
+
+  /** Cancels whatever settlement was started for a payment that stopped being payable meanwhile; a failed cancel is owed. */
   async function release(record: PaymentRecord): Promise<void> {
     const current = (await payments.get(record.id)) ?? record
     if (current.status !== "failed" && current.status !== "rejected") return
-    const adapter = adapters.get(current.network)
-    if (!isStripeAdapter(adapter)) return
-    try {
-      await adapter.cancel(current)
-    } catch {
-      emit({
-        name: "ps.settlement.failed",
-        paymentRequestId: current.paymentRequestId,
-        paymentId: current.id,
-        data: { network: current.network, reason: "cancel_failed" },
-      })
-    }
+    await cancelOrOwe(current, current.status)
   }
 
   /**
@@ -526,7 +593,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
       return { ok: false, refusal: new Refusal(409, "settlement_mismatch", "The settlement does not match the payment; no receipt was issued.") }
     }
     // At most one fail, so one cancel attempt, per call.
-    const owed = cancelOwed.get(paymentId)
+    const owed = failureOwed.get(paymentId)
     let after: PaymentRecord | undefined
     if (result.reason === "failed") after = await fail(payment, result.detail ?? "The payment failed.")
     else if (owed) after = await fail(payment, owed.failure, owed.reason)
@@ -543,7 +610,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   async function confirm(payment: PaymentRecord, result: Extract<SettlementResult, { settled: true }>): Promise<boolean> {
     const settlement = { ref: result.ref, settledAt: result.settledAt }
     if (!(await payments.transition(payment.id, "requires_payment", { status: "settled", next: undefined, settlement }))) return false
-    cancelOwed.delete(payment.id)
+    failureOwed.delete(payment.id)
     emit({
       name: "ps.settlement.confirmed",
       paymentRequestId: payment.paymentRequestId,
@@ -576,7 +643,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     }
     // A decline is not final: the payer can try again on the same PaymentIntent, so the payment stays payable.
     // Events can arrive out of order, so a PaymentIntent that has since succeeded is left to the success path.
-    if (payment.status === "requires_payment" && intent.status !== "succeeded" && !cancelOwed.has(paymentId)) failed("declined")
+    if (payment.status === "requires_payment" && intent.status !== "succeeded" && !failureOwed.has(paymentId)) failed("declined")
     else await touch(payment)
   }
 

@@ -137,6 +137,7 @@ describe("cancelling the PaymentIntent of a failed Stripe payment", () => {
     expect(ps.log.all("ps.settlement.failed").map((event) => event.data?.reason)).toEqual(["cancel_failed", "expired"])
   })
 
+  // spec-fix(T7): STR-5 was amended; a payment that never got a next action now fails at once instead of staying pending_approval until its cancel is confirmed, and the approver's list and decision still retry the owed cancel
   it("STR-5: a cancel that a failing approval could not confirm is retried by the approver's next list and decision", async () => {
     const ps = setupPaymentService({ stripe: true })
     const auth = { Authorization: `Bearer ${APPROVER_TOKEN}` }
@@ -152,22 +153,86 @@ describe("cancelling the PaymentIntent of a failed Stripe payment", () => {
     expect((await ps.post(`/approvals/${approvalId}/decision`, { decision: "approve" }, auth)).status).toBe(200)
     const intentId = ps.gateway.intents[0]?.id as string
     expect(ps.gateway.cancelCalls).toEqual([intentId])
-    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("pending_approval")
+    // No next action was issued, so the payment fails at once although the cancel was refused.
+    const failed = await expectView(await ps.getPayment(view.paymentId), 200)
+    expect(failed.status).toBe("failed")
+    expect(failed.next).toBeUndefined()
 
-    // The approver's list touches it: Stripe refuses again, so it still has not failed.
+    // The approver's full list touches it: Stripe refuses again, and the payment stays failed.
     expect((await ps.app.request("/approvals", { headers: auth })).status).toBe(200)
     expect(ps.gateway.cancelCalls).toEqual([intentId, intentId])
-    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("pending_approval")
+    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("failed")
 
-    // A decision touches it too; the cancel is confirmed, the payment fails, and the decision stays final.
+    // A decision touches it too; the cancel is confirmed, and the decision stays final.
     await expectError(await ps.post(`/approvals/${approvalId}/decision`, { decision: "reject" }, auth), 409, "approval_already_decided")
     expect(ps.gateway.cancelCalls).toEqual([intentId, intentId, intentId])
     expect(ps.gateway.intents[0]?.status).toBe("canceled")
     expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("failed")
-    expect(ps.log.all("ps.settlement.failed").map((event) => event.data?.reason)).toEqual(["cancel_failed", "cancel_failed", "failed"])
+    expect(ps.log.all("ps.settlement.failed").map((event) => event.data?.reason)).toEqual(["failed", "cancel_failed", "cancel_failed"])
+
+    // Once confirmed, nothing is retried.
+    expect((await ps.app.request("/approvals", { headers: auth })).status).toBe(200)
+    expect(ps.gateway.cancelCalls).toHaveLength(3)
   })
 
-  it("STR-5: a payment whose settlement never started and whose cancel is outstanding is never shown as payable", async () => {
+  it("STR-5: a payment that never got a next action after approval is failed for a polling client, not left waiting for a human", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const auth = { Authorization: `Bearer ${APPROVER_TOKEN}` }
+    vi.spyOn(ps.gateway, "createPaymentIntent").mockRejectedValueOnce(new Error("Stripe is unavailable"))
+    ps.gateway.failCancels(1)
+    const { paymentRequestToken } = await ps.request({ amount: 7500 })
+    const view = await expectView(await ps.initiate(paymentRequestToken, "stripe-usd"), 202)
+    expect((await ps.post(`/approvals/${view.approvalId as string}/decision`, { decision: "approve" }, auth)).status).toBe(200)
+    // What the client's poll reads.
+    const polled = await expectView(await ps.getPayment(view.paymentId), 200)
+    expect(polled.status).toBe("failed")
+    expect(polled.failure).toBe("Settlement could not be started.")
+    // It no longer waits in the approver's pending list either.
+    const pending = await ps.app.request("/approvals?status=pending", { headers: auth })
+    expect(((await pending.json()) as { approvals: unknown[] }).approvals).toEqual([])
+    expect(ps.log.names()).not.toContain("ps.settlement.started")
+  })
+
+  // spec-fix(T7): STR-5 was amended; a payment that never got a next action fails at once, so the repeat and the read answer 200 with the failed payment instead of 500, while its cancel is still retried
+  it("STR-5: a payment whose settlement never started fails at once although its cancel failed, and a later touch retries the cancel", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    vi.spyOn(ps.gateway, "createPaymentIntent").mockImplementationOnce(async (input) => {
+      await FakeStripeGateway.prototype.createPaymentIntent.call(ps.gateway, input)
+      throw new Error("the connection to Stripe timed out")
+    })
+    ps.gateway.failCancels(1)
+    const { paymentRequestToken } = await ps.request()
+    // The initiation itself still answers 500: settlement could not be started.
+    await expectError(await ps.initiate(paymentRequestToken, "stripe-usd"), 500, "internal_error")
+    // The repeat and the read show the failed payment, never requires_payment without a next action.
+    const repeated = await expectView(await ps.initiate(paymentRequestToken, "stripe-usd"), 200)
+    expect(repeated.status).toBe("failed")
+    expect(repeated.next).toBeUndefined()
+    const read = await expectView(await ps.getPayment("pay_0001"), 200)
+    expect(read.status).toBe("failed")
+    expect(read.failure).toBe("Settlement could not be started.")
+    expect(ps.log.all("ps.settlement.failed").map((event) => event.data)).toEqual([
+      { network: "stripe", reason: "failed" },
+      { network: "stripe", reason: "cancel_failed", cause: "failed" },
+    ])
+    const intentId = ps.gateway.intents[0]?.id as string
+    expect(ps.gateway.intents[0]?.status).toBe("requires_payment_method")
+    // Neither the read nor the repeat is a touch.
+    expect(ps.gateway.cancelCalls).toEqual([intentId])
+
+    // The receipt route touches it and the cancel is confirmed; the payment stays failed.
+    await expectError(await ps.receipt("pay_0001"), 409, "payment_not_settled")
+    expect(ps.gateway.cancelCalls).toEqual([intentId, intentId])
+    expect(ps.gateway.intents[0]?.status).toBe("canceled")
+    expect((await expectView(await ps.getPayment("pay_0001"), 200)).status).toBe("failed")
+    expect(ps.log.all("ps.settlement.failed")).toHaveLength(2)
+
+    // Once confirmed, nothing is retried.
+    await expectError(await ps.receipt("pay_0001"), 409, "payment_not_settled")
+    expect(ps.gateway.cancelCalls).toHaveLength(2)
+  })
+
+  it("STR-5: a webhook for a failed payment whose cancel is owed retries the cancel", async () => {
     const ps = setupPaymentService({ stripe: true })
     vi.spyOn(ps.gateway, "createPaymentIntent").mockImplementationOnce(async (input) => {
       await FakeStripeGateway.prototype.createPaymentIntent.call(ps.gateway, input)
@@ -176,14 +241,41 @@ describe("cancelling the PaymentIntent of a failed Stripe payment", () => {
     ps.gateway.failCancels(1)
     const { paymentRequestToken } = await ps.request()
     await expectError(await ps.initiate(paymentRequestToken, "stripe-usd"), 500, "internal_error")
-    // The repeat and the read refuse rather than show requires_payment without a next action.
-    await expectError(await ps.initiate(paymentRequestToken, "stripe-usd"), 500, "internal_error")
-    await expectError(await ps.getPayment("pay_0001"), 500, "internal_error")
-    expect(ps.log.one("ps.settlement.failed").data).toMatchObject({ reason: "cancel_failed", cause: "failed" })
-
-    await expectError(await ps.receipt("pay_0001"), 409, "payment_not_settled")
+    const intentId = ps.gateway.intents[0]?.id as string
+    expect((await webhook(ps, ps.gateway.webhookBody("payment_intent.payment_failed", intentId, "evt_after_fail"))).status).toBe(200)
+    expect(ps.gateway.cancelCalls).toEqual([intentId, intentId])
     expect(ps.gateway.intents[0]?.status).toBe("canceled")
     expect((await expectView(await ps.getPayment("pay_0001"), 200)).status).toBe("failed")
+    expect(ps.log.all("ps.settlement.failed").map((event) => event.data?.reason)).toEqual(["failed", "cancel_failed"])
+  })
+
+  it("STR-5: when a payment fails while its approved settlement is starting, a refused release cancel is owed and retried on touch", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const auth = { Authorization: `Bearer ${APPROVER_TOKEN}` }
+    const { paymentRequestToken } = await ps.request({ amount: 7500 })
+    const view = await expectView(await ps.initiate(paymentRequestToken, "stripe-usd"), 202)
+    // A failure that began before settlement started lands while Stripe creates the PaymentIntent.
+    vi.spyOn(ps.gateway, "createPaymentIntent").mockImplementationOnce(async (input) => {
+      const intent = await FakeStripeGateway.prototype.createPaymentIntent.call(ps.gateway, input)
+      expect(await ps.payments.transition(view.paymentId, "pending_approval", { status: "failed", failure: "The payment request expired before a human decided." })).toBe(true)
+      return intent
+    })
+    ps.gateway.failCancels(1)
+    expect((await ps.post(`/approvals/${view.approvalId as string}/decision`, { decision: "approve" }, auth)).status).toBe(200)
+    const intentId = ps.gateway.intents[0]?.id as string
+    const failed = await expectView(await ps.getPayment(view.paymentId), 200)
+    expect(failed.status).toBe("failed")
+    expect(failed.next).toBeUndefined()
+    expect(ps.log.names()).not.toContain("ps.settlement.started")
+    // Releasing the PaymentIntent the approval created was refused, so the cancel is owed.
+    expect(ps.gateway.cancelCalls).toEqual([intentId])
+    expect(ps.gateway.intents[0]?.status).toBe("requires_payment_method")
+    expect(ps.log.one("ps.settlement.failed").data).toMatchObject({ reason: "cancel_failed", cause: "failed" })
+
+    // The release cancel was owed: the next touch retries it and Stripe confirms.
+    await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
+    expect(ps.gateway.cancelCalls).toEqual([intentId, intentId])
+    expect(ps.gateway.intents[0]?.status).toBe("canceled")
   })
 
   it("when creating the PaymentIntent throws after Stripe created it, the payment fails and that PaymentIntent is cancelled", async () => {

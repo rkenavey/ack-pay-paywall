@@ -49,7 +49,7 @@ $ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: applicatio
 
 | Decision | Payment | Events | The client |
 | :- | :- | :- | :- |
-| Approve | `pending_approval` to `requires_payment`, with `next` set. The settlement adapter's `begin` runs exactly once, before the status changes, so the payment is never payable without its next action. | `ps.approval.decided` (actor `human`, `decision=approve`), then `ps.settlement.started` | pays, fetches the receipt and retries: `delivered` |
+| Approve | `pending_approval` to `requires_payment`, with `next` set. The settlement adapter's `begin` runs exactly once, before the status changes, so the payment is never payable without its next action. If `begin` fails (Stripe could not create the PaymentIntent), the payment moves straight to `failed` and the decision stays recorded; see [stripe.md](stripe.md#when-a-payment-fails). | `ps.approval.decided` (actor `human`, `decision=approve`), then `ps.settlement.started`; or `ps.settlement.failed` with `reason=failed` | pays, fetches the receipt and retries: `delivered`; or fails `payment_failed` on its next poll |
 | Reject | `pending_approval` to `rejected`. No adapter is called; the settle and receipt routes answer `409`. | `ps.approval.decided` (`decision=reject`) | fails `approval_rejected` |
 | Request expired | `failed`, and the decision answers `410 payment_request_expired`. Listing approvals also fails a waiting payment whose request has expired and leaves it out. | `ps.settlement.failed` with `reason=expired` | fails `payment_failed` on its next poll |
 

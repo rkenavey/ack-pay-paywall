@@ -50,23 +50,33 @@ The settlement time in the receipt is when the payment service first saw the Pay
 
 ## When a payment fails
 
-A decline does not fail a payment: the payer can try again on the same PaymentIntent. A Stripe payment fails only when its PaymentIntent is `canceled`, or its payment request expires before the money arrives (noticed by the receipt route, the webhook, an approval decision or the approver's list). To fail it, the payment service first cancels the PaymentIntent, and the payment moves to `failed` only once Stripe confirms the cancel, so a failed payment can never take money later:
+A decline does not fail a payment: the payer can try again on the same PaymentIntent. A Stripe payment fails only when its PaymentIntent is `canceled`, its payment request expires before the money arrives (noticed by the receipt route, the webhook, an approval decision or the approver's list), or settlement could not be started. Failing a payment always cancels its PaymentIntent, so a failed payment can never take money later. When the payment moves to `failed` depends on whether its next action (the client secret) was ever issued.
 
-- if no PaymentIntent was created (the payment was still waiting for a human), there is nothing to cancel and the payment fails at once;
+**No next action was issued**: the PaymentIntent create threw, at initiation or right after an approval, or the payment was still waiting for a human. Nobody holds the client secret, so nobody can pay that PaymentIntent, and the payment fails at once:
+
+- if no PaymentIntent was created there is nothing to cancel;
 - if creating it threw, Stripe may have created it anyway, so the service repeats the create with the same idempotency key and cancels what comes back;
-- if Stripe refuses because the PaymentIntent has succeeded, the money has moved: the payment is settled and the receipt is issued, even though the request has expired;
-- if the cancel fails for any other reason, the payment stays in `requires_payment` (or `pending_approval`), `ps.settlement.failed` is logged with `reason=cancel_failed`, and the receipt route keeps answering `409 payment_not_settled`. The next time the payment is touched (the receipt route, the webhook, the approver's list or a decision) the service tries the cancel once more; reading the payment with `GET` does not count. Should the PaymentIntent succeed before that, the touch settles the payment instead.
+- if that cancel fails, the payment is still `failed`, `ps.settlement.failed` is logged with `reason=cancel_failed` and the cause, and the cancel is owed and retried on the next touch.
 
-Each touch makes at most one cancel attempt and logs at most one event, so a cancel Stripe keeps refusing is retried only as often as something asks about the payment. A payment whose settlement never started (no next action) while its cancel is outstanding answers `500 internal_error` rather than appear payable.
+The initiation that could not start settlement answers `500 internal_error`; repeating it answers `200` with the failed payment, and `GET /payments/:id` shows it as `failed`. After an approval, the waiting client's next poll sees `failed` and the run ends `payment_failed`.
+
+**The next action was issued**: the payer may have the client secret, so the payment moves to `failed` only once Stripe confirms the cancel:
+
+- if Stripe refuses because the PaymentIntent has succeeded, the money has moved: the payment is settled and the receipt is issued, even though the request has expired;
+- if the cancel fails for any other reason, the payment stays in `requires_payment`, `ps.settlement.failed` is logged with `reason=cancel_failed`, and the receipt route keeps answering `409 payment_not_settled`. The next touch tries the cancel once more. Should the PaymentIntent succeed before that, the touch settles the payment instead.
+
+The touches are the receipt route, the webhook (for either event type), the approver's list and a decision; settling counts too, but it only acts on payments in `requires_payment`. Reading the payment with `GET` or repeating the initiation does not count. For a payment that has already failed, the receipt route, the webhook, a decision on its approval and an approver list that includes it (`GET /approvals` or `?status=approved`; the panel's `?status=pending` list no longer shows it) retry its owed cancel. A payment that failed at initiation has no approval, so only the receipt route or a webhook retries its cancel; the client agent stops at the `500` and calls neither, and the PaymentIntent stays uncancelled, but unpayable since its client secret was never sent, until one of them does or the process restarts.
+
+Each touch makes at most one cancel attempt and logs at most one event, so a cancel Stripe keeps refusing is retried only as often as something asks about the payment. Owed cancels live in process memory.
 
 `ps.settlement.failed` carries one of these reasons:
 
 | `reason` | Meaning | Payment afterwards |
 | :- | :- | :- |
 | `declined` | The webhook reported `payment_intent.payment_failed`. | `requires_payment`; the payer can try again |
-| `cancel_failed` | Cancelling the PaymentIntent failed; `cause` is the reason the payment was being failed (`expired` or `failed`). It has no `cause` when the PaymentIntent belonged to a payment that had already failed or been rejected. | unchanged; retried on the next touch |
+| `cancel_failed` | Cancelling the PaymentIntent failed; `cause` is why the payment was being failed (`expired` or `failed`), or `failed`/`rejected` when the payment had already ended while its settlement was starting. | `requires_payment` when its next action was issued; otherwise already `failed` (or `rejected`). Retried on the next touch |
 | `expired` | The payment request expired before the money arrived, and the cancel is confirmed. | `failed` |
-| `failed` | The PaymentIntent was `canceled`, or settlement could not be started, and the cancel is confirmed. | `failed` |
+| `failed` | The PaymentIntent was `canceled` and the cancel is confirmed, or settlement could not be started (logged when the payment fails, before its cancel is attempted). | `failed` |
 | `mismatch` | The PaymentIntent succeeded for another amount, currency or payment id. | unchanged; no receipt is issued |
 
 ## The webhook

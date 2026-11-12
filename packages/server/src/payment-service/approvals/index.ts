@@ -6,7 +6,6 @@ import {
   type ApprovalListBody,
   type ApprovalView,
   type ErrorBody,
-  type NextAction,
   type PaymentServiceErrorCode,
 } from "@paywall/protocol"
 import type { Approval, PaymentRecord, PaymentServiceDeps } from "../types.ts"
@@ -14,22 +13,24 @@ import type { Approval, PaymentRecord, PaymentServiceDeps } from "../types.ts"
 /**
  * What the approver routes need from the payment service that mounts them:
  * its stores, clock, log and approver token, its way of starting settlement,
- * and its ways of failing a payment, retrying an outstanding cancel and
- * releasing settlement it started.
+ * and its ways of failing a payment and retrying an outstanding cancel.
  */
 export interface ApproverRoutesContext {
   deps: Pick<PaymentServiceDeps, "payments" | "approvals" | "approverToken" | "clock" | "log">
-  /** Calls the payment's settlement adapter `begin`; throws when there is no adapter or it fails. */
-  begin(record: PaymentRecord): Promise<NextAction>
   /**
-   * Moves a payment that has not settled to `failed` and logs `ps.settlement.failed`. A Stripe
-   * payment moves only once its PaymentIntent cancel is confirmed; otherwise it keeps its status.
+   * Calls the payment's settlement adapter `begin` once and moves the payment from
+   * `pending_approval` to `requires_payment` with its next action, logging
+   * `ps.settlement.started`. When settlement cannot start the payment fails at once.
+   * Resolves with the payment as it now is; never leaves it waiting for a decision.
+   */
+  start(record: PaymentRecord): Promise<PaymentRecord>
+  /**
+   * Moves a payment that has not settled to `failed` and logs `ps.settlement.failed`. A payment
+   * whose next action was issued moves only once its PaymentIntent cancel is confirmed.
    */
   fail(record: PaymentRecord, failure: string, reason: string): Promise<PaymentRecord>
   /** Retries, once, the PaymentIntent cancel a payment is owed; returns the payment as it now is. */
   touch(record: PaymentRecord): Promise<PaymentRecord>
-  /** Cancels whatever settlement was started for a payment that is no longer payable. */
-  release(record: PaymentRecord): Promise<void>
 }
 
 type Status = 400 | 401 | 404 | 409 | 410 | 500
@@ -134,7 +135,7 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
       data: { approvalId: approval.id, decision, outcome: status, noted: note !== undefined },
     })
 
-    if (decision === "approve") await startSettlement(payment)
+    if (decision === "approve") await ctx.start(payment)
     else await payments.transition(payment.id, "pending_approval", { status: "rejected" })
 
     const decided = (await approvals.get(approval.id)) ?? { ...approval, status, decidedAt: now }
@@ -143,33 +144,6 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
 
   function expired(payment: PaymentRecord): boolean {
     return payment.expiresAt !== undefined && payment.expiresAt.getTime() <= clock.now().getTime()
-  }
-
-  /**
-   * Calls the adapter's `begin` once and moves the payment to
-   * `requires_payment` with its next action in one compare-and-set, so the
-   * payment is never payable without one.
-   */
-  async function startSettlement(payment: PaymentRecord): Promise<void> {
-    let next
-    try {
-      next = await ctx.begin(payment)
-    } catch {
-      await ctx.fail(payment, "Settlement could not be started.", "failed")
-      return
-    }
-    if (await payments.transition(payment.id, "pending_approval", { status: "requires_payment", next })) {
-      log.emit({
-        name: "ps.settlement.started",
-        actor: "payment-service",
-        paymentRequestId: payment.paymentRequestId,
-        paymentId: payment.id,
-        data: { network: payment.network, next: next.type },
-      })
-    } else {
-      // The payment failed while settlement was starting; nothing may stay payable for it.
-      await ctx.release(payment)
-    }
   }
 
   return app

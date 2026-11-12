@@ -36,7 +36,7 @@ $ pnpm exec vitest run packages/client/test/agent packages/client/test/ui tests/
 
 $ pnpm exec vitest run packages/server/test/stripe packages/client/test/stripe tests/e2e/stripe
  Test Files  7 passed (7)
-      Tests  54 passed (54)
+      Tests  58 passed (58)
 
 $ pnpm exec vitest run packages/server/test/approvals packages/client/test/approvals tests/e2e/approval
  Test Files  4 passed (4)
@@ -48,7 +48,7 @@ $ pnpm exec vitest run tests/e2e/http
 
 $ pnpm test
  Test Files  27 passed (27)
-      Tests  278 passed (278)
+      Tests  282 passed (282)
 
 $ pnpm test:stripe-live
  Test Files  1 passed (1)
