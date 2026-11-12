@@ -16,7 +16,8 @@ The wire contract is in [docs/protocol.md](docs/protocol.md).
 - The server (`packages/server`): the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for a human, settles on the sandbox network and signs ACK receipts. `pnpm setup:env` writes a working `.env`, and the server logs one line per protocol event. Its tests pass. See [docs/server.md](docs/server.md).
 - The client (`packages/client`): the client agent verifies the `402`, signs a payment initiation, pays on the sandbox network, verifies the receipt and retries once; it waits while a payment needs approval. The page lists both catalogs, shows every step of a run with the decoded payment request and receipt, and writes each event to the browser console. Its identity is an Ed25519 `did:key` kept in `localStorage`. See [docs/client.md](docs/client.md) and [docs/architecture.md](docs/architecture.md).
 - Human approval: the approver routes on the payment service, guarded by the approver token, and a *Human approver* panel on the page that lists waiting payments and approves or rejects them. Approving starts settlement and the waiting run completes; rejecting ends it `approval_rejected`. See [docs/approvals.md](docs/approvals.md).
-- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server, client agent, page, approval and in-process end-to-end tests pass; the Stripe tests fail until the Stripe option is built, and the over-HTTP sandbox case fails only its count of responses.
+- Stripe test mode: with test-mode keys in `.env`, payment requests also offer `stripe-usd`. The payment service creates a PaymentIntent after the spend policy allows the payment, the page shows Stripe's Payment Element (3D Secure and declines handled in the page), and the payment service retrieves the PaymentIntent from Stripe and checks its status, amount, currency and payment id before it signs a receipt. A signed Stripe webhook can settle or fail payments too. `pnpm test:stripe-live` checks it against the real test-mode API. See [docs/stripe.md](docs/stripe.md).
+- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server, client agent, page, Stripe, approval and in-process end-to-end tests pass, and so does the live Stripe check; the over-HTTP sandbox case fails only its count of responses.
 
 ## Prerequisites
 
@@ -57,6 +58,8 @@ Open http://localhost:5173. The page shows the client agent's DID and the catalo
 - **Partner feed** ($5.00, Globex). Globex is not on the allowlist, so the payment service refuses before anything is paid: the run fails `policy_denied` with rule `counterparty_not_allowed`.
 - **Annual report** ($75.00, Acme). Over the $50 approval threshold: the run stops at `awaiting_approval`, waiting for a human. In the *Human approver* panel, paste `APPROVER_TOKEN` from `.env`, press *Load approvals*, and press *Approve*: the run pays and ends `delivered`. Press *Reject* instead and it ends `approval_rejected`. Nobody deciding within five minutes ends it `approval_timeout`. See [docs/approvals.md](docs/approvals.md).
 
+With Stripe test-mode keys in `.env` (see [docs/stripe.md](docs/stripe.md)), the agent prefers the `stripe-usd` option: while the run is `paying`, a *Card payment (Stripe test mode)* form appears in the agent run. Pay with `4242 4242 4242 4242`, any future expiry and any CVC, and the run continues to `delivered`; the receipt's option is `stripe-usd`.
+
 The timeline lists every client event; the browser console shows the same events, and the server terminal prints the server agent and payment service events for the same payment request id ([docs/server.md](docs/server.md) explains the lines).
 
 ## Repository layout
@@ -88,6 +91,7 @@ tests/stripe-live/         the live Stripe test-mode check
 - [docs/server.md](docs/server.md): the server agents and the payment service, their routes, configuration and log.
 - [docs/client.md](docs/client.md): the client agent's flow, the page, and how the agent's identity is stored.
 - [docs/approvals.md](docs/approvals.md): the human approver, the approver routes and the panel.
+- [docs/stripe.md](docs/stripe.md): Stripe test-mode keys, the Payment Element, what is checked before a receipt, the webhook, test cards and the live test.
 - [docs/architecture.md](docs/architecture.md): the roles, who holds which key, and the sequence mapped to code and events.
 - [docs/testing.md](docs/testing.md): running the tests, how they are organised, the acceptance IDs and the testkit.
 - [docs/decisions.md](docs/decisions.md): choices made along the way and why.

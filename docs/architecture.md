@@ -7,9 +7,11 @@ Browser (Vite, :5173)                     Node process (:8787)
 ┌──────────────────────────┐   HTTP   ┌───────────────────────────────────────┐
 │ Client agent (did:key)   │─────────▶│ /api              Acme server agent   │
 │  agent core + React page │          │ /partner          Globex server agent │
-└──────────────────────────┘─────────▶│ /payment-service  payment + receipt   │
-                                      │   service: policy, sandbox settlement │
-                                      └───────────────────────────────────────┘
+│ Human approver panel     │─────────▶│ /payment-service  payment + receipt   │
+│ Stripe Payment Element   │──┐       │   service: policy, approvals, sandbox │
+└──────────────────────────┘  │       │   and Stripe settlement               │
+                              ▼       └──────────────────┬────────────────────┘
+                     Stripe (test mode) ◀────────────────┘
 ```
 
 ## Roles and keys
@@ -20,6 +22,7 @@ Browser (Vite, :5173)                     Node process (:8787)
 | Acme server agent | `packages/server/src/server-agent` at `/api` | `did:key` | `ACME_AGENT_JWK` in `.env` | payment requests |
 | Globex server agent | the same code at `/partner` | `did:key` | `GLOBEX_AGENT_JWK` in `.env` | payment requests |
 | Payment service, also the receipt service | `packages/server/src/payment-service` | `did:key` | `PAYMENT_SERVICE_JWK` in `.env` | receipts |
+| Stripe | `packages/server/src/payment-service/stripe` (gateway and adapter), `packages/client/src/stripe` (Payment Element) | `STRIPE_SECRET_KEY` (server only), `STRIPE_PUBLISHABLE_KEY` (sent to the browser per payment), optional `STRIPE_WEBHOOK_SECRET` | `.env` on the server | nothing ACK; the payment service reads PaymentIntents back from Stripe before it signs a receipt ([stripe.md](stripe.md)) |
 | Human approver | `packages/client/src/approver` (panel), `packages/server/src/payment-service/approvals` (routes) | none: a bearer token, `APPROVER_TOKEN` | `.env` on the server; the person pastes it into the panel, which keeps it in memory only. The client agent never has it | nothing; decides payments over the threshold |
 
 Who trusts whom:
@@ -58,11 +61,16 @@ sequenceDiagram
         H->>P: POST /payment-service/approvals/:id/decision (Bearer approver token)
         Note over H,P: ps.approval.decided (actor human)<br/>approve: adapter.begin, then requires_payment; reject: the run ends approval_rejected
     end
-    P-->>C: requires_payment, next = sandbox_settle (201, or the poll after approval)
-    Note over P: 5. ps.settlement.started (adapter.begin)
-    C->>P: POST /payments/:id/sandbox/settle
-    Note over C,P: client.payment.executing (sandbox executor)<br/>ps.settlement.confirmed (settle, adapter.verify)
+    P-->>C: requires_payment, next = sandbox_settle or stripe_payment_element (201, or the poll after approval)
+    Note over P: 5. ps.settlement.started (adapter.begin; Stripe: create the PaymentIntent)
+    alt sandbox
+        C->>P: POST /payments/:id/sandbox/settle
+        Note over C,P: client.payment.executing (sandbox executor)<br/>ps.settlement.confirmed (settle, adapter.verify)
+    else Stripe
+        Note over C: client.payment.executing (Stripe executor)<br/>Payment Element, stripe.confirmPayment in the browser
+    end
     C->>P: POST /payments/:id/receipt
+    Note over P: Stripe: settle retrieves the PaymentIntent, ps.settlement.confirmed
     P-->>C: 200 { receipt }
     Note over C,P: 6. ps.receipt.issued (createPaymentReceipt, signCredential)<br/>7. client.receipt.received, client.receipt.verified (verifyPaymentReceipt)
     C->>S: GET /api/resources/:id, Payment-Receipt: <receipt>
@@ -77,7 +85,7 @@ sequenceDiagram
 | 2. Payment request | `verifyPaymentRequestToken`, mismatch and expiry checks | `paymentRequired`: `createSignedPaymentRequest`, saved to the request store | |
 | 3. Select and initiate | `selectOption`, `createJwt`, `POST /payments` | | `initiate`: verify initiation and token, check the option |
 | 4. Negotiation | `waitForDecision` polls while `pending_approval`; `403` ends the run `policy_denied` | | `evaluateSpend`; `deny` answers `403`, `needs_approval` holds the payment as `pending_approval` until `createApproverRoutes` records the human's decision |
-| 5. Execution | the executor for the network (`createSandboxExecutor`) | | `begin` when the policy allows or the human approves; `settle` on the settle route |
+| 5. Execution | the executor for the network (`createSandboxExecutor`, or `createStripeCheckout` with `StripePaymentForm` on the page) | | `begin` when the policy allows or the human approves; `settle` on the sandbox settle route, the receipt route or the Stripe webhook |
 | 6. Receipt generation | | | `issue`: `createPaymentReceipt`, `signCredential`, once per payment |
 | 7. Receipt delivery | `verifyReceipt`: issuer, token, option and subject | | `POST /payments/:id/receipt` |
 | 8. Present receipt | retry with `Payment-Receipt` | `checkReceipt`: `verifyPaymentReceipt`, issued here, right resource, known option, `redeem` | |

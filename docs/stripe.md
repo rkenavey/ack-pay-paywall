@@ -50,6 +50,8 @@ stripe listen --forward-to localhost:8787/payment-service/webhooks/stripe
 
 It prints a signing secret. Put it in `.env` as `STRIPE_WEBHOOK_SECRET=whsec_your_signing_secret` and restart the server.
 
+This step follows Stripe's CLI documentation and has not yet been run against this project: the webhook route has so far been exercised only with locally signed test events. Without a webhook secret the demo still works, because the receipt route checks the PaymentIntent with Stripe directly.
+
 `POST /payment-service/webhooks/stripe` reads the raw body and verifies the `Stripe-Signature` header with that secret (`400 webhook_signature_invalid` otherwise). It then:
 
 - `payment_intent.succeeded`: retrieves the PaymentIntent and settles the payment it names, with the same checks as above;
