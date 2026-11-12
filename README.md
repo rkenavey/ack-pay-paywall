@@ -144,3 +144,7 @@ tests/stripe-live/         the live Stripe test-mode check
 - [docs/architecture.md](docs/architecture.md): the roles, who holds which key, and the sequence mapped to code and events.
 - [docs/testing.md](docs/testing.md): running the tests, how they are organised, the acceptance IDs and the testkit.
 - [docs/decisions.md](docs/decisions.md): choices made along the way and why.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
