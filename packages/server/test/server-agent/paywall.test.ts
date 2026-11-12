@@ -152,6 +152,35 @@ describe("verifying a receipt", () => {
     await expectRejected(await get("market-brief", receipt), "receipt_expired", body)
   })
 
+  it("SA-7: a receipt that expired long ago, beyond ACK's clock-skew window, answers 402 receipt_expired", async () => {
+    const { get, paymentRequired, receiptFor, clock } = setupServerAgent()
+    const body = await paymentRequired()
+    const receipt = await receiptFor(body, { expirationDate: new Date(clock.now().getTime() + 60_000) })
+    clock.advanceSeconds(3600)
+    await expectRejected(await get("market-brief", receipt), "receipt_expired", body)
+  })
+
+  it("SA-7: a tampered or retyped receipt that expired long ago still answers 402 receipt_invalid", async () => {
+    const { get, paymentRequired, receiptFor, clock } = setupServerAgent()
+    const body = await paymentRequired()
+    const expirationDate = new Date(clock.now().getTime() + 60_000)
+    const tampered = tamperSignature(await receiptFor(body, { expirationDate }))
+    const other = await buildOtherCredential({ paymentRequestToken: body.paymentRequestToken, paymentOptionId: "sandbox-usd", expirationDate })
+    clock.advanceSeconds(3600)
+    await expectRejected(await get("market-brief", tampered), "receipt_invalid", body)
+    await expectRejected(await get("market-brief", other), "receipt_invalid", body)
+  })
+
+  it("SA-7: an expired receipt from an untrusted issuer answers receipt_expired in and beyond the skew window, as ACK checks expiry first", async () => {
+    const { get, paymentRequired, receiptFor, clock } = setupServerAgent()
+    const body = await paymentRequired()
+    const receipt = await receiptFor(body, { issuer: fixtures.untrusted, expirationDate: new Date(clock.now().getTime() + 60_000) })
+    clock.advanceSeconds(61)
+    await expectRejected(await get("market-brief", receipt), "receipt_expired", body)
+    clock.advanceSeconds(3600)
+    await expectRejected(await get("market-brief", receipt), "receipt_expired", body)
+  })
+
   it("SA-8: a valid receipt for another resource answers 402 receipt_wrong_resource", async () => {
     const { get, paymentRequired, receiptFor } = setupServerAgent()
     const forBrief = await paymentRequired("market-brief")

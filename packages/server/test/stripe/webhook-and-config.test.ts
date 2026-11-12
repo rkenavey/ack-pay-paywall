@@ -62,17 +62,62 @@ describe("Stripe webhook", () => {
     expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("requires_payment")
   })
 
-  it("STR-5: payment_intent.payment_failed fails the payment", async () => {
+  // spec-fix(T7): STR-5 was amended; payment_intent.payment_failed now leaves the payment in requires_payment so the payer can retry on the same PaymentIntent
+  it("STR-5: payment_intent.payment_failed leaves the payment in requires_payment, and a later succeeded webhook settles it", async () => {
     const ps = setupPaymentService({ stripe: true })
     const { view, intentId } = await stripePayment(ps)
     ps.gateway.update(intentId, { status: "requires_payment_method" })
-    const body = ps.gateway.webhookBody("payment_intent.payment_failed", intentId, "evt_0003")
-    expect((await webhook(ps, body, ps.gateway.signWebhook(body))).status).toBe(200)
+    const declined = ps.gateway.webhookBody("payment_intent.payment_failed", intentId, "evt_0003")
+    expect((await webhook(ps, declined, ps.gateway.signWebhook(declined))).status).toBe(200)
+
+    const waiting = await expectView(await ps.getPayment(view.paymentId), 200)
+    expect(waiting.status).toBe("requires_payment")
+    expect(waiting.next).toEqual(view.next)
+    expect(ps.log.one("ps.settlement.failed").data).toMatchObject({ network: "stripe", reason: "declined", paymentIntent: intentId })
+    await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
+    expect(ps.gateway.cancelCalls).toEqual([])
+
+    // The payer tries again on the same PaymentIntent and it succeeds.
+    ps.gateway.succeed(intentId)
+    const succeeded = ps.gateway.webhookBody("payment_intent.succeeded", intentId, "evt_0004")
+    expect((await webhook(ps, succeeded, ps.gateway.signWebhook(succeeded))).status).toBe(200)
+    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("settled")
+    expect((await ps.receipt(view.paymentId)).status).toBe(200)
+    expect(ps.gateway.cancelCalls).toEqual([])
+  })
+
+  it("STR-5: after a payment_failed webhook, a later success settles through the receipt route", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const { view, intentId } = await stripePayment(ps)
+    const declined = ps.gateway.webhookBody("payment_intent.payment_failed", intentId, "evt_0005")
+    expect((await webhook(ps, declined, ps.gateway.signWebhook(declined))).status).toBe(200)
+    ps.gateway.succeed(intentId)
+    expect((await ps.receipt(view.paymentId)).status).toBe(200)
+    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("settled")
+  })
+
+  it("STR-5: a payment whose PaymentIntent was canceled fails, and the cancel is confirmed through the gateway", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const { view, intentId } = await stripePayment(ps)
+    ps.gateway.update(intentId, { status: "canceled" })
+    await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
+    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("failed")
+    expect(ps.gateway.cancelCalls).toEqual([intentId])
+  })
+
+  it("STR-5: a payment whose request expired before it was paid fails and its PaymentIntent is cancelled", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const { paymentRequestToken } = await ps.request({ expiresInMs: 60_000 })
+    const view = await expectView(await ps.initiate(paymentRequestToken, "stripe-usd"), 201)
+    const intentId = ps.gateway.intents[0]?.id as string
+    ps.clock.advanceSeconds(61)
+    await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
     const failed = await expectView(await ps.getPayment(view.paymentId), 200)
     expect(failed.status).toBe("failed")
-    expect(failed.failure).toEqual(expect.any(String))
-    expect(ps.log.names()).toContain("ps.settlement.failed")
-    await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
+    expect(failed.next).toBeUndefined()
+    expect(ps.gateway.cancelCalls).toEqual([intentId])
+    expect(ps.gateway.intents[0]?.status).toBe("canceled")
+    expect(ps.log.one("ps.settlement.failed").data).toMatchObject({ reason: "expired" })
   })
 
   it("STR-5: other event types are acknowledged with 200 and ignored", async () => {

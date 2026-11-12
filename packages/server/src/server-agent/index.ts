@@ -2,6 +2,7 @@ import {
   createSignedPaymentRequest,
   CredentialExpiredError,
   UntrustedIssuerError,
+  verifyJwt,
   verifyPaymentReceipt,
   type PaymentOption,
   type Resolvable,
@@ -189,6 +190,7 @@ export function createServerAgent(deps: ServerAgentDeps): Hono {
     } catch (error) {
       if (error instanceof UntrustedIssuerError) return { ok: false, code: "receipt_untrusted_issuer" }
       if (error instanceof CredentialExpiredError) return { ok: false, code: "receipt_expired" }
+      if (isJwtExpiryError(error)) return { ok: false, code: await classifyExpiredJwt(presented) }
       return { ok: false, code: "receipt_invalid" }
     }
 
@@ -210,7 +212,41 @@ export function createServerAgent(deps: ServerAgentDeps): Hono {
     return { ok: true, paymentRequestId, paymentOptionId }
   }
 
+  /**
+   * Classifies a receipt whose JWT was rejected for its `exp` alone. ACK only
+   * raises `CredentialExpiredError` within the JWT library's clock-skew
+   * window (about 300 s); beyond it the JWT check fails first with a plain
+   * error. That check verifies the signature before it looks at `exp`, and
+   * verifying again with the expiry policy off proves it independently, so
+   * a tampered or wrongly signed receipt still lands on `receipt_invalid`.
+   * Like ACK, which checks expiry before the trusted issuers, an expired
+   * receipt answers `receipt_expired` whoever signed it.
+   */
+  async function classifyExpiredJwt(presented: string): Promise<ReceiptErrorCode> {
+    let payload: Awaited<ReturnType<typeof verifyJwt>>["payload"]
+    try {
+      ;({ payload } = await verifyJwt(presented, { resolver: deps.resolver, policies: { exp: false } }))
+    } catch {
+      return "receipt_invalid"
+    }
+    if (typeof payload.exp !== "number" || payload.exp * 1000 > clock.now().getTime()) return "receipt_invalid"
+    if (!isPaymentReceiptClaim(payload.vc)) return "receipt_invalid"
+    return "receipt_expired"
+  }
+
   return app
+}
+
+/** True for the JWT library's "JWT has expired" rejection, which it raises only after the signature verified. */
+function isJwtExpiryError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("invalid_jwt: JWT has expired")
+}
+
+/** True when a JWT's `vc` claim names the payment receipt credential type. */
+function isPaymentReceiptClaim(vc: unknown): boolean {
+  if (typeof vc !== "object" || vc === null) return false
+  const type: unknown = (vc as Record<string, unknown>).type
+  return Array.isArray(type) && type.includes("PaymentReceiptCredential")
 }
 
 /** The identity, clock and id interfaces the server agent depends on, defined in the protocol package. */

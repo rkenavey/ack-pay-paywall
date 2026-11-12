@@ -87,5 +87,20 @@ describe("Stripe test mode, live", () => {
       paymentRequestIssuer: fixtures.acme.did,
     })
     expect(verified.receipt.credentialSubject.metadata).toMatchObject({ settlementRef: intentId, network: "stripe", amount: 500, currency: "USD" })
+
+    // A succeeded PaymentIntent is never reported as cancelled.
+    await expect(gateway.cancelPaymentIntent(intentId)).rejects.toThrow()
+    expect((await retrieve(intentId)).status).toBe("succeeded")
+  })
+
+  it("cancelPaymentIntent cancels a fresh PaymentIntent and resolves again once it is canceled", async () => {
+    expect(secretKey, "STRIPE_SECRET_KEY must be set in .env").toMatch(/^(sk|rk)_test_/)
+    const gateway = createStripeGateway({ secretKey })
+    const id = randomIds.next("live")
+    const { id: intentId } = await gateway.createPaymentIntent({ amount: 500, currency: "usd", metadata: { paymentId: id }, idempotencyKey: `pi:${id}` })
+    await gateway.cancelPaymentIntent(intentId)
+    expect((await retrieve(intentId)).status).toBe("canceled")
+    await gateway.cancelPaymentIntent(intentId)
+    expect((await retrieve(intentId)).status).toBe("canceled")
   })
 })

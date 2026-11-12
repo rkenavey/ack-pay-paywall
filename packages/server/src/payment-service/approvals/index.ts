@@ -14,13 +14,15 @@ import type { Approval, PaymentRecord, PaymentServiceDeps, SettlementAdapter } f
 /**
  * What the approver routes need from the payment service that mounts them:
  * its stores, clock, log and approver token, its settlement adapters, and its
- * way of failing a payment.
+ * ways of failing a payment and of releasing settlement it started.
  */
 export interface ApproverRoutesContext {
   deps: Pick<PaymentServiceDeps, "payments" | "approvals" | "approverToken" | "clock" | "log">
   adapter(network: Network): SettlementAdapter | undefined
-  /** Moves a payment that has not settled to `failed` and logs `ps.settlement.failed`. */
+  /** Moves a payment that has not settled to `failed`, cancelling its PaymentIntent, and logs `ps.settlement.failed`. */
   fail(record: PaymentRecord, failure: string, reason: string): Promise<PaymentRecord>
+  /** Cancels whatever settlement was started for a payment that is no longer payable. */
+  release(record: PaymentRecord): Promise<void>
 }
 
 type Status = 400 | 401 | 404 | 409 | 410 | 500
@@ -160,6 +162,9 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
         paymentId: payment.id,
         data: { network: payment.network, next: next.type },
       })
+    } else {
+      // The payment failed while settlement was starting; nothing may stay payable for it.
+      await ctx.release(payment)
     }
   }
 

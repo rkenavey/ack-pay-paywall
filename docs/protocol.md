@@ -49,7 +49,7 @@ Option ids are `<network>-usd`; networks are `stripe` and `sandbox`.
 | :- | :- |
 | `receipt_invalid` | Not a valid receipt: bad signature, not a JWT, another credential type, a token from another server agent, a request id never issued here, or an option id not in the request. |
 | `receipt_untrusted_issuer` | Signed by someone other than the payment service. |
-| `receipt_expired` | Past its expiry by up to five minutes. A receipt more than five minutes past its expiry is refused earlier, by the JWT check inside ACK's verification, and answers `receipt_invalid`. |
+| `receipt_expired` | Past its expiry, however long ago. The signature is checked first, so a tampered receipt is `receipt_invalid` even when it has also expired. As in ACK, expiry is checked before the issuer, so an expired receipt from another issuer is `receipt_expired` too. |
 | `receipt_wrong_resource` | Paid for another resource. |
 | `receipt_already_redeemed` | Already used once. |
 

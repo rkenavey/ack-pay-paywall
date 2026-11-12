@@ -78,6 +78,19 @@ export interface SandboxAdapter extends SettlementAdapter {
   markPaid(payment: PaymentRecord, at: Date): Promise<void>
 }
 
+/**
+ * The Stripe adapter: settles through a PaymentIntent per payment.
+ *
+ * `cancel` cancels the payment's PaymentIntent so a failed payment can never
+ * capture money later. It resolves when there is nothing left that can be
+ * paid: no PaymentIntent was created, or it is now canceled. It rejects when
+ * the PaymentIntent could not be cancelled, including when it has succeeded.
+ */
+export interface StripeAdapter extends SettlementAdapter {
+  readonly network: "stripe"
+  cancel(payment: PaymentRecord): Promise<void>
+}
+
 /** The input for creating a PaymentIntent. `amount` is in minor units. */
 export interface CreatePaymentIntentInput {
   amount: number
@@ -101,11 +114,15 @@ export interface PaymentIntentSnapshot {
  * The seam over the Stripe SDK, so tests can replace Stripe with a fake.
  *
  * `constructWebhookEvent` throws when the signature does not verify.
+ * `cancelPaymentIntent` cancels a PaymentIntent that can still be paid and
+ * resolves for one that is already canceled; it rejects for any other
+ * PaymentIntent, such as one that has succeeded.
  */
 export interface StripeGateway {
   createPaymentIntent(input: CreatePaymentIntentInput): Promise<{ id: string; clientSecret: string }>
   retrievePaymentIntent(id: string): Promise<PaymentIntentSnapshot>
   constructWebhookEvent(rawBody: string, signature: string): { id: string; type: string; paymentIntentId?: string }
+  cancelPaymentIntent(id: string): Promise<void>
 }
 
 /** A request for a human to approve one payment. */

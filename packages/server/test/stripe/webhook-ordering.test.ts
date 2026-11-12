@@ -29,12 +29,31 @@ describe("Stripe settlement edge cases", () => {
     expect((await ps.receipt(view.paymentId)).status).toBe(200)
   })
 
+  it("a payment_failed event that arrives after the PaymentIntent succeeded logs no decline", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const { intentId } = await stripePayment(ps)
+    ps.gateway.succeed(intentId)
+    expect((await webhook(ps, ps.gateway.webhookBody("payment_intent.payment_failed", intentId, "evt_late_decline"))).status).toBe(200)
+    expect(ps.log.all("ps.settlement.failed")).toHaveLength(0)
+  })
+
+  it("repeated declines on one PaymentIntent each log a decline and leave the payment payable", async () => {
+    const ps = setupPaymentService({ stripe: true })
+    const { view, intentId } = await stripePayment(ps)
+    for (const id of ["evt_decline_1", "evt_decline_2"]) {
+      expect((await webhook(ps, ps.gateway.webhookBody("payment_intent.payment_failed", intentId, id))).status).toBe(200)
+    }
+    expect(ps.log.all("ps.settlement.failed").map((event) => event.data?.reason)).toEqual(["declined", "declined"])
+    expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("requires_payment")
+  })
+
   it("a canceled PaymentIntent fails the payment when the receipt is asked for", async () => {
     const ps = setupPaymentService({ stripe: true })
     const { view, intentId } = await stripePayment(ps)
     ps.gateway.update(intentId, { status: "canceled" })
     await expectError(await ps.receipt(view.paymentId), 409, "payment_not_settled")
     expect((await expectView(await ps.getPayment(view.paymentId), 200)).status).toBe("failed")
+    expect(ps.gateway.cancelCalls).toEqual([intentId])
   })
 
   it("the settlement time is fixed when the PaymentIntent is first seen succeeded", async () => {

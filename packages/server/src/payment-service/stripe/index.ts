@@ -1,6 +1,6 @@
 import Stripe from "stripe"
 import { systemClock, type Clock } from "@paywall/protocol"
-import type { PaymentIntentSnapshot, SettlementAdapter, SettlementResult, StripeGateway } from "../types.ts"
+import type { CreatePaymentIntentInput, PaymentIntentSnapshot, SettlementResult, StripeAdapter, StripeGateway } from "../types.ts"
 
 // PaymentIntent statuses that may still turn into a payment. `requires_payment_method`
 // is among them: after a decline the payer can try again on the same PaymentIntent.
@@ -13,16 +13,21 @@ const STILL_PAYABLE = new Set(["requires_payment_method", "requires_confirmation
  * idempotency key `pi:<paymentId>`, and returns the client secret with
  * `publishableKey` for the browser. `verify` retrieves the PaymentIntent and
  * accepts it only when it succeeded for the expected amount, currency and
- * payment id.
+ * payment id. `cancel` cancels the payment's PaymentIntent through the
+ * gateway, and does nothing when none was created. When creating the
+ * PaymentIntent threw, Stripe may have created it anyway, so `cancel`
+ * repeats the create with the same idempotency key and cancels the result.
  *
  * `clock` stamps the settlement time when `verify` first sees the
  * PaymentIntent succeeded; it defaults to the system clock. The adapter
  * remembers which PaymentIntent belongs to which payment in process memory.
  */
-export function createStripeAdapter(options: { gateway: StripeGateway; publishableKey: string; clock?: Clock }): SettlementAdapter {
+export function createStripeAdapter(options: { gateway: StripeGateway; publishableKey: string; clock?: Clock }): StripeAdapter {
   const { gateway, publishableKey } = options
   const clock = options.clock ?? systemClock
   const intents = new Map<string, { id: string; clientSecret: string }>()
+  // Create calls that threw: Stripe may still have created the PaymentIntent, so cancel replays them.
+  const uncertain = new Map<string, CreatePaymentIntentInput>()
   const settledAt = new Map<string, Date>()
 
   return {
@@ -34,7 +39,7 @@ export function createStripeAdapter(options: { gateway: StripeGateway; publishab
       if (payment.amount.decimals !== 2) throw new Error("the Stripe adapter only settles two-decimal currencies")
       let intent = intents.get(payment.id)
       if (!intent) {
-        intent = await gateway.createPaymentIntent({
+        const input: CreatePaymentIntentInput = {
           amount: payment.amount.amount,
           currency: payment.amount.currency.toLowerCase(),
           ...(payment.description === undefined ? {} : { description: payment.description }),
@@ -45,7 +50,14 @@ export function createStripeAdapter(options: { gateway: StripeGateway; publishab
             payer: payment.payer,
           },
           idempotencyKey: `pi:${payment.id}`,
-        })
+        }
+        try {
+          intent = await gateway.createPaymentIntent(input)
+        } catch (error) {
+          uncertain.set(payment.id, input)
+          throw error
+        }
+        uncertain.delete(payment.id)
         intents.set(payment.id, intent)
       }
       return { type: "stripe_payment_element", clientSecret: intent.clientSecret, publishableKey }
@@ -68,6 +80,17 @@ export function createStripeAdapter(options: { gateway: StripeGateway; publishab
       }
       return { settled: true, ref: intent.id, settledAt: new Date(at.getTime()) }
     },
+
+    async cancel(payment) {
+      let id = intents.get(payment.id)?.id
+      const attempted = uncertain.get(payment.id)
+      if (!id && attempted) {
+        // The same idempotency key returns the PaymentIntent Stripe created, if it created one.
+        id = (await gateway.createPaymentIntent(attempted)).id
+        uncertain.delete(payment.id)
+      }
+      if (id) await gateway.cancelPaymentIntent(id)
+    },
   }
 }
 
@@ -87,6 +110,9 @@ function mismatch(intent: PaymentIntentSnapshot, paymentId: string, amount: numb
  * PaymentIntents are created with automatic payment methods that never
  * redirect, so the Payment Element offers only methods that complete in the
  * page. Errors from Stripe are passed through; they never contain the key.
+ * `cancelPaymentIntent` resolves for a PaymentIntent that is already
+ * canceled and rejects for one Stripe will not cancel, such as one that
+ * has succeeded.
  */
 export function createStripeGateway(options: { secretKey: string; webhookSecret?: string }): StripeGateway {
   if (!/^(sk|rk)_test_/.test(options.secretKey)) throw new Error("the Stripe gateway accepts only a test-mode secret key")
@@ -118,6 +144,16 @@ export function createStripeGateway(options: { secretKey: string; webhookSecret?
         amountReceived: intent.amount_received,
         currency: intent.currency,
         metadata: { ...intent.metadata },
+      }
+    },
+
+    async cancelPaymentIntent(id) {
+      try {
+        await stripe.paymentIntents.cancel(id)
+      } catch (error) {
+        // Stripe refuses to cancel a PaymentIntent that is already canceled, which is the outcome wanted.
+        const intent = await stripe.paymentIntents.retrieve(id)
+        if (intent.status !== "canceled") throw error
       }
     },
 

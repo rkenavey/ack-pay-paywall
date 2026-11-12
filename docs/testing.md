@@ -28,15 +28,15 @@ $ pnpm exec vitest run packages/server/test/policy
 
 $ pnpm exec vitest run packages/server/test/server-agent packages/server/test/payment-service
  Test Files  4 passed (4)
-      Tests  56 passed (56)
+      Tests  59 passed (59)
 
 $ pnpm exec vitest run packages/client/test/agent packages/client/test/ui tests/e2e/core
  Test Files  5 passed (5)
       Tests  39 passed (39)
 
 $ pnpm exec vitest run packages/server/test/stripe packages/client/test/stripe tests/e2e/stripe
- Test Files  6 passed (6)
-      Tests  37 passed (37)
+ Test Files  7 passed (7)
+      Tests  48 passed (48)
 
 $ pnpm exec vitest run packages/server/test/approvals packages/client/test/approvals tests/e2e/approval
  Test Files  4 passed (4)
@@ -47,12 +47,12 @@ $ pnpm exec vitest run tests/e2e/http
       Tests  3 passed (3)
 
 $ pnpm test
- Test Files  26 passed (26)
-      Tests  258 passed (258)
+ Test Files  27 passed (27)
+      Tests  272 passed (272)
 
 $ pnpm test:stripe-live
  Test Files  1 passed (1)
-      Tests  1 passed (1)
+      Tests  2 passed (2)
 ```
 
 ## Layout
@@ -105,5 +105,5 @@ The page tests rely on this page structure:
 | `fixtures`, `fixtureIdentity`, `identityFromPrivateJwk`, `fixtureResolver` | Deterministic `did:key` identities for Acme, Globex, the payment service (secp256k1), the client and an untrusted issuer, derived from readable test-only seeds. |
 | `buildPaymentRequest`, `paymentOption`, `buildInitiation`, `buildReceipt`, `buildOtherCredential`, `tamperSignature` | Builders for signed ACK artifacts, made with the ACK functions, and a way to break a signature. |
 | `inProcessFetch`, `FetchStub`, `json` | A `fetch` over an in-process app, and a scripted `fetch` that records requests. |
-| `FakeStripeGateway`, `FAKE_STRIPE_KEYS` | A Stripe stand-in behind the `StripeGateway` seam whose PaymentIntents a test can succeed or alter, with HMAC-signed webhooks. |
+| `FakeStripeGateway`, `FAKE_STRIPE_KEYS` | A Stripe stand-in behind the `StripeGateway` seam whose PaymentIntents a test can succeed or alter, with HMAC-signed webhooks. It records every create and cancel call, and `failCancels` makes the next cancels fail. |
 | `fixtureEnv`, `fixtureStripeEnv`, constants | Environment variables for the server built from the fixtures, and the URLs, origin and approver token the tests use. |

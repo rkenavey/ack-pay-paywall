@@ -17,10 +17,18 @@ export const FAKE_STRIPE_KEYS = {
  * same key returns the same PaymentIntent. Webhooks are signed with an HMAC
  * of the raw body under the webhook secret; {@link FakeStripeGateway.signWebhook}
  * produces a valid signature.
+ *
+ * `cancelPaymentIntent` behaves like Stripe: it cancels a PaymentIntent that
+ * can still be paid, resolves for one already canceled, and rejects for one
+ * that has succeeded. Every call is recorded in `cancelCalls`; a test makes
+ * the next calls fail with {@link FakeStripeGateway.failCancels}.
  */
 export class FakeStripeGateway implements StripeGateway {
   /** Every `createPaymentIntent` call, in order, including idempotent repeats. */
   readonly createCalls: CreatePaymentIntentInput[] = []
+  /** The PaymentIntent id of every `cancelPaymentIntent` call, in order, including ones that failed. */
+  readonly cancelCalls: string[] = []
+  #cancelFailures = 0
   readonly #intents = new Map<string, PaymentIntentSnapshot & { clientSecret: string }>()
   readonly #byKey = new Map<string, string>()
   readonly #webhookSecret: string
@@ -74,6 +82,23 @@ export class FakeStripeGateway implements StripeGateway {
       type: event.type,
       ...(object?.object === "payment_intent" && object.id ? { paymentIntentId: object.id } : {}),
     }
+  }
+
+  async cancelPaymentIntent(id: string): Promise<void> {
+    this.cancelCalls.push(id)
+    if (this.#cancelFailures > 0) {
+      this.#cancelFailures -= 1
+      throw new Error("Stripe could not be reached")
+    }
+    const intent = this.#intent(id)
+    if (intent.status === "canceled") return
+    if (intent.status === "succeeded") throw new Error("You cannot cancel this PaymentIntent because it has a status of succeeded.")
+    intent.status = "canceled"
+  }
+
+  /** Makes the next `count` `cancelPaymentIntent` calls fail as if Stripe could not be reached. */
+  failCancels(count = 1): void {
+    this.#cancelFailures = count
   }
 
   /** The PaymentIntents created so far. */

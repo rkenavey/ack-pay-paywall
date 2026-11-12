@@ -43,17 +43,29 @@ The browser's word is never the evidence. When the receipt is requested, the pay
 | `succeeded` and matching | `200` with the receipt; `settlementRef` in its metadata is the PaymentIntent id |
 | `requires_payment_method`, `requires_confirmation`, `requires_action`, `processing` | `409 payment_not_settled`; the payment stays payable |
 | `canceled` | `409 payment_not_settled`; the payment moves to `failed` |
+| not `succeeded`, and the payment request has expired | `409 payment_not_settled`; the PaymentIntent is cancelled and the payment moves to `failed` |
 | `succeeded` but another amount, currency or payment id | `409 settlement_mismatch`; nothing is issued |
 
-The settlement time in the receipt is when the payment service first saw the PaymentIntent succeeded.
+The settlement time in the receipt is when the payment service first saw the PaymentIntent succeeded. A PaymentIntent that succeeded is honoured even when the payment request has expired since: the money has moved, so the receipt is issued.
+
+## When a payment fails
+
+A decline does not fail a payment: the payer can try again on the same PaymentIntent. A Stripe payment fails only when its PaymentIntent is `canceled`, or its payment request expires before the money arrives (noticed by the receipt route, an approval decision or the approver's list). Whenever the payment service fails a Stripe payment it first cancels the PaymentIntent, so a failed payment cannot take money later, except in the last case below, where Stripe does not confirm the cancel:
+
+- if no PaymentIntent was created (the payment was still waiting for a human), there is nothing to cancel;
+- if creating it threw, Stripe may have created it anyway, so the service repeats the create with the same idempotency key and cancels what comes back;
+- if Stripe refuses because the PaymentIntent has just succeeded, the payment is settled instead of failed;
+- if the cancel fails for any other reason, the payment still fails (`ps.settlement.failed` carries `cancel=failed`). Should that PaymentIntent succeed later, no receipt is issued and the webhook logs `ps.settlement.failed` with `reason=succeeded_after_failure`, so the payment can be refunded by hand in the Stripe Dashboard.
 
 ## The webhook
 
 Without a webhook the demo still works: the receipt route checks the PaymentIntent directly. To have Stripe tell the server as well, forward events with the [Stripe CLI](https://docs.stripe.com/stripe-cli):
 
 ```sh
-stripe listen --forward-to localhost:8787/payment-service/webhooks/stripe
+stripe listen --events payment_intent.succeeded,payment_intent.payment_failed --forward-to localhost:8787/payment-service/webhooks/stripe
 ```
+
+Current versions of the CLI require `--events` (or `--all-snapshot` / `--all-thin`); without it `stripe listen` stops with "must specify events to forward".
 
 It prints a signing secret. Put it in `.env` as `STRIPE_WEBHOOK_SECRET=whsec_your_signing_secret` and restart the server.
 
@@ -62,12 +74,11 @@ This step follows Stripe's CLI documentation and has not yet been run against th
 `POST /payment-service/webhooks/stripe` reads the raw body and verifies the `Stripe-Signature` header with that secret (`400 webhook_signature_invalid` otherwise). It then:
 
 - `payment_intent.succeeded`: retrieves the PaymentIntent and settles the payment it names, with the same checks as above;
-- `payment_intent.payment_failed`: moves the payment to `failed`, unless Stripe now reports the PaymentIntent as succeeded;
+- `payment_intent.payment_failed`: logs `ps.settlement.failed` with `reason=declined` and leaves the payment in `requires_payment`, so a retry on the same PaymentIntent still settles it, through this webhook or the receipt route. Nothing is logged when Stripe now reports the PaymentIntent as succeeded;
 - anything else: `200`, ignored.
 
 Each event id is handled once; a redelivery answers `200` and changes nothing. With no secret configured the route answers `503 webhook_not_configured` and processes nothing.
 
-With the webhook on, a declined card fails the payment, so trying again in the page does not lead to a receipt: see the last entry of [decisions.md](decisions.md) on this.
 
 ## Test cards
 
@@ -85,12 +96,12 @@ Any future expiry, any CVC and any postal code.
 pnpm test:stripe-live
 ```
 
-It reads only the `STRIPE_*` variables from `.env` and fails when the keys are missing. Against the real test-mode API it begins a payment, checks the PaymentIntent Stripe created (amount, currency, automatic payment methods without redirects, metadata), checks that no receipt is issued before confirmation, confirms the PaymentIntent with the test payment method `pm_card_visa` (standing in for the browser), then issues the receipt and verifies it with ACK:
+It reads only the `STRIPE_*` variables from `.env` and fails when the keys are missing. Against the real test-mode API it begins a payment, checks the PaymentIntent Stripe created (amount, currency, automatic payment methods without redirects, metadata), checks that no receipt is issued before confirmation, confirms the PaymentIntent with the test payment method `pm_card_visa` (standing in for the browser), then issues the receipt and verifies it with ACK, and checks that the succeeded PaymentIntent cannot be cancelled. A second test creates a PaymentIntent, cancels it through the gateway, and cancels it again to show an already-canceled one is accepted:
 
 ```
 $ pnpm test:stripe-live
  Test Files  1 passed (1)
-      Tests  1 passed (1)
+      Tests  2 passed (2)
 ```
 
-It creates a $5.00 test payment in your Stripe account each time it runs. The offline tests never talk to Stripe: the server tests use a fake gateway behind the `StripeGateway` interface, and the page tests mock Stripe.js (see [testing.md](testing.md)).
+It creates a $5.00 test payment and a canceled PaymentIntent in your Stripe account each time it runs. The offline tests never talk to Stripe: the server tests use a fake gateway behind the `StripeGateway` interface, and the page tests mock Stripe.js (see [testing.md](testing.md)).
