@@ -86,8 +86,11 @@ export function createStripeAdapter(options: { gateway: StripeGateway; publishab
       const attempted = uncertain.get(payment.id)
       if (!id && attempted) {
         // The same idempotency key returns the PaymentIntent Stripe created, if it created one.
-        id = (await gateway.createPaymentIntent(attempted)).id
+        // Remember it, so a retry after a failed cancel still knows what to cancel.
+        const intent = await gateway.createPaymentIntent(attempted)
+        intents.set(payment.id, intent)
         uncertain.delete(payment.id)
+        id = intent.id
       }
       if (id) await gateway.cancelPaymentIntent(id)
     },

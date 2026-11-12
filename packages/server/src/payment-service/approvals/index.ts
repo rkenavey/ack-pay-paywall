@@ -6,21 +6,28 @@ import {
   type ApprovalListBody,
   type ApprovalView,
   type ErrorBody,
-  type Network,
+  type NextAction,
   type PaymentServiceErrorCode,
 } from "@paywall/protocol"
-import type { Approval, PaymentRecord, PaymentServiceDeps, SettlementAdapter } from "../types.ts"
+import type { Approval, PaymentRecord, PaymentServiceDeps } from "../types.ts"
 
 /**
  * What the approver routes need from the payment service that mounts them:
- * its stores, clock, log and approver token, its settlement adapters, and its
- * ways of failing a payment and of releasing settlement it started.
+ * its stores, clock, log and approver token, its way of starting settlement,
+ * and its ways of failing a payment, retrying an outstanding cancel and
+ * releasing settlement it started.
  */
 export interface ApproverRoutesContext {
   deps: Pick<PaymentServiceDeps, "payments" | "approvals" | "approverToken" | "clock" | "log">
-  adapter(network: Network): SettlementAdapter | undefined
-  /** Moves a payment that has not settled to `failed`, cancelling its PaymentIntent, and logs `ps.settlement.failed`. */
+  /** Calls the payment's settlement adapter `begin`; throws when there is no adapter or it fails. */
+  begin(record: PaymentRecord): Promise<NextAction>
+  /**
+   * Moves a payment that has not settled to `failed` and logs `ps.settlement.failed`. A Stripe
+   * payment moves only once its PaymentIntent cancel is confirmed; otherwise it keeps its status.
+   */
   fail(record: PaymentRecord, failure: string, reason: string): Promise<PaymentRecord>
+  /** Retries, once, the PaymentIntent cancel a payment is owed; returns the payment as it now is. */
+  touch(record: PaymentRecord): Promise<PaymentRecord>
   /** Cancels whatever settlement was started for a payment that is no longer payable. */
   release(record: PaymentRecord): Promise<void>
 }
@@ -82,11 +89,10 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
     for (const approval of listed) {
       let payment = await payments.get(approval.paymentId)
       if (!payment) continue
-      if (approval.status === "pending") {
-        // A request that expired while it waited can no longer be paid: fail it so the client stops waiting.
-        if (expired(payment)) payment = await ctx.fail(payment, "The payment request expired before a human decided.", "expired")
-        if (payment.status !== "pending_approval") continue
-      }
+      // A request that expired while it waited can no longer be paid: fail it so the client stops waiting.
+      if (approval.status === "pending" && expired(payment)) payment = await ctx.fail(payment, "The payment request expired before a human decided.", "expired")
+      else payment = await ctx.touch(payment)
+      if (approval.status === "pending" && payment.status !== "pending_approval") continue
       views.push(toApprovalView(approval, payment))
     }
     return c.json<ApprovalListBody>({ approvals: views })
@@ -106,15 +112,15 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
     const approval = await approvals.get(c.req.param("id"))
     if (!approval) return refuse(c, 404, "approval_not_found", "No such approval.")
     const alreadyDecided = () => refuse(c, 409, "approval_already_decided", "This approval was already decided; a decision is final.")
-    if (approval.status !== "pending") return alreadyDecided()
-    const payment = await payments.get(approval.paymentId)
-    if (!payment) return refuse(c, 500, "internal_error", "The approval has no payment.")
+    const found = await payments.get(approval.paymentId)
+    if (!found) return refuse(c, 500, "internal_error", "The approval has no payment.")
 
-    if (expired(payment)) {
-      await ctx.fail(payment, "The payment request expired before a human decided.", "expired")
+    if (approval.status === "pending" && expired(found)) {
+      await ctx.fail(found, "The payment request expired before a human decided.", "expired")
       return refuse(c, 410, "payment_request_expired", "The payment request has expired; the payment failed.")
     }
-    if (payment.status !== "pending_approval") return alreadyDecided()
+    const payment = await ctx.touch(found)
+    if (approval.status !== "pending" || payment.status !== "pending_approval") return alreadyDecided()
 
     const now = clock.now()
     const status = decision === "approve" ? "approved" : "rejected"
@@ -145,11 +151,9 @@ export function createApproverRoutes(ctx: ApproverRoutesContext): Hono {
    * payment is never payable without one.
    */
   async function startSettlement(payment: PaymentRecord): Promise<void> {
-    const adapter = ctx.adapter(payment.network)
     let next
     try {
-      if (!adapter) throw new Error("no adapter")
-      next = await adapter.begin(payment)
+      next = await ctx.begin(payment)
     } catch {
       await ctx.fail(payment, "Settlement could not be started.", "failed")
       return

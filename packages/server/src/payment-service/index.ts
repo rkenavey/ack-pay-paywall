@@ -22,13 +22,22 @@ import {
   type EventLog,
   type Money,
   type Network,
+  type NextAction,
   type PaymentServiceErrorCode,
   type PaymentView,
   type PolicyDecision,
   type ReceiptBody,
 } from "@paywall/protocol"
 import { createApproverRoutes } from "./approvals/index.ts"
-import type { PaymentRecord, PaymentServiceDeps, SandboxAdapter, SettlementAdapter, SettlementResult, StripeAdapter, StripeGateway } from "./types.ts"
+import type {
+  PaymentRecord,
+  PaymentServiceDeps,
+  SandboxAdapter,
+  SettlementAdapter,
+  SettlementResult,
+  StripeAdapter,
+  StripeGateway,
+} from "./types.ts"
 
 /** The payment service types: payments, stores, settlement adapters, the Stripe gateway seam and approvals. */
 export type * from "./types.ts"
@@ -74,6 +83,19 @@ function toView(record: PaymentRecord): PaymentView {
   }
 }
 
+/**
+ * The public form of a payment, for a response. A payment in
+ * `requires_payment` with no next action (settlement never started, and the
+ * cancel of what it may have created is still outstanding) cannot be shown
+ * without breaking the wire contract, so it answers `500` instead.
+ */
+function view(record: PaymentRecord): PaymentView {
+  if (record.status === "requires_payment" && !record.next) {
+    throw new Refusal(500, "internal_error", "Settlement for this payment could not be started; it cannot be paid.")
+  }
+  return toView(record)
+}
+
 function isSandboxAdapter(adapter: SettlementAdapter | undefined): adapter is SandboxAdapter {
   return adapter?.network === "sandbox" && typeof (adapter as Partial<SandboxAdapter>).markPaid === "function"
 }
@@ -105,6 +127,10 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   const issuing = new Map<string, Promise<JwtString>>()
   // Stripe webhook event ids already handled, so a redelivery changes nothing.
   const webhookEvents = new Set<string>()
+  // Settlement being started per payment, so failing a payment waits for the PaymentIntent it may create.
+  const beginning = new Map<string, Promise<NextAction>>()
+  // Payments to fail once their PaymentIntent cancel is confirmed. Each touch of one retries the cancel once.
+  const cancelOwed = new Map<string, { failure: string; reason: string }>()
 
   const app = new Hono()
 
@@ -115,13 +141,13 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
 
   app.post("/payments", async (c) => {
     const result = await initiate(c)
-    return c.json(toView(result.payment), result.status)
+    return c.json(view(result.payment), result.status)
   })
 
   app.get("/payments/:id", async (c) => {
     const payment = await payments.get(c.req.param("id"))
     if (!payment) throw notFound()
-    return c.json(toView(payment))
+    return c.json(view(payment))
   })
 
   app.post("/payments/:id/sandbox/settle", async (c) => {
@@ -149,6 +175,8 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     if (payment.status === "requires_payment") {
       const outcome = await settle(id)
       if (!outcome.ok) throw outcome.refusal
+    } else {
+      await touch(payment)
     }
     const receipt = await receiptFor(id)
     return c.json<ReceiptBody>({ receipt })
@@ -181,7 +209,7 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     return c.json({ received: true })
   })
 
-  app.route("/approvals", createApproverRoutes({ deps, adapter: (network) => adapters.get(network), fail, release }))
+  app.route("/approvals", createApproverRoutes({ deps, begin: startWith, fail, touch, release }))
 
   // ---------------------------------------------------------------------------
 
@@ -302,8 +330,8 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     const stored = await store(record)
     if (stored !== true) return repeat(stored, payee)
     const begun = await begin(record)
-    // 201 promises a payment in requires_payment; the failed payment stays stored for repeats.
-    if (begun.status !== "requires_payment") throw new Refusal(500, "internal_error", "Settlement could not be started; the payment failed.")
+    // 201 promises a payment that can be paid; one that failed, or whose cancel is outstanding, stays stored for repeats.
+    if (begun.status !== "requires_payment" || !begun.next) throw new Refusal(500, "internal_error", "Settlement could not be started; the payment failed.")
     return { payment: begun, status: 201 }
   }
 
@@ -353,11 +381,9 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
 
   /** Starts settlement for a payment in `requires_payment` and records its next action. */
   async function begin(record: PaymentRecord): Promise<PaymentRecord> {
-    const adapter = adapters.get(record.network)
     let next
     try {
-      if (!adapter) throw new Error("no adapter")
-      next = await adapter.begin(record)
+      next = await startWith(record)
     } catch {
       return fail(record, "Settlement could not be started.")
     }
@@ -371,48 +397,83 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
   }
 
   /**
-   * Moves a payment that has not settled to `failed`, cancelling its Stripe
-   * PaymentIntent first so a failed payment can never capture money later.
-   *
-   * When the PaymentIntent cannot be cancelled because it has succeeded, the
-   * money has arrived: the payment is settled instead of failed. Any other
-   * cancel error still fails the payment, so it is never left payable.
+   * Calls the payment's adapter `begin`, the only place money movement
+   * starts, and records the call as in flight until it settles. Throws when
+   * the network has no adapter or `begin` fails.
    */
-  async function fail(record: PaymentRecord, failure: string, reason = "failed"): Promise<PaymentRecord> {
-    const from = record.status
-    if (from === "requires_payment" || from === "pending_approval") {
-      const cancelled = await cancelSettlement(record)
-      if (cancelled === "settled") return (await payments.get(record.id)) ?? record
-      if (await payments.transition(record.id, from, { status: "failed", failure, next: undefined })) {
-        emit({
-          name: "ps.settlement.failed",
-          paymentRequestId: record.paymentRequestId,
-          paymentId: record.id,
-          data: { network: record.network, reason, ...(cancelled === "cancel_failed" ? { cancel: "failed" } : {}) },
-        })
-      }
+  async function startWith(record: PaymentRecord): Promise<NextAction> {
+    const adapter = adapters.get(record.network)
+    if (!adapter) throw new Error(`no adapter for the ${record.network} network`)
+    const started = adapter.begin(record)
+    beginning.set(record.id, started)
+    try {
+      return await started
+    } finally {
+      if (beginning.get(record.id) === started) beginning.delete(record.id)
     }
-    return (await payments.get(record.id)) ?? record
   }
 
-  /** Cancels the payment's PaymentIntent, if it has one, and says what happened. */
-  async function cancelSettlement(record: PaymentRecord): Promise<"done" | "settled" | "cancel_failed"> {
-    const adapter = adapters.get(record.network)
-    if (!isStripeAdapter(adapter)) return "done"
-    try {
-      await adapter.cancel(record)
-      return "done"
-    } catch {
-      if (record.status !== "requires_payment") return "cancel_failed"
-      let result: SettlementResult | undefined
-      try {
-        result = await adapter.verify(record)
-      } catch {
-        result = undefined
-      }
-      if (result?.settled && (await settle(record.id)).ok) return "settled"
-      return "cancel_failed"
+  /**
+   * Moves a payment that has not settled to `failed`. A Stripe payment moves
+   * only once its PaymentIntent cancel is confirmed, so a failed payment can
+   * never capture money later.
+   *
+   * When the cancel is refused or errors, the payment keeps its status, the
+   * failure is owed, and `ps.settlement.failed` is logged with
+   * `reason=cancel_failed`; the next touch of the payment tries the cancel
+   * once more. A PaymentIntent that cannot be cancelled because it has
+   * succeeded wins: the payment is settled instead. Never throws for a
+   * cancel or verify error.
+   */
+  async function fail(record: PaymentRecord, failure: string, reason = "failed"): Promise<PaymentRecord> {
+    // A PaymentIntent being created now must exist before it can be cancelled.
+    await beginning.get(record.id)?.catch(() => undefined)
+    const current = (await payments.get(record.id)) ?? record
+    const from = current.status
+    if (from !== "requires_payment" && from !== "pending_approval") {
+      cancelOwed.delete(current.id)
+      return current
     }
+    const adapter = adapters.get(current.network)
+    if (isStripeAdapter(adapter)) {
+      try {
+        await adapter.cancel(current)
+      } catch {
+        if (from === "requires_payment") {
+          let result: SettlementResult | undefined
+          try {
+            result = await adapter.verify(current)
+          } catch {
+            result = undefined
+          }
+          if (result?.settled && (await confirm(current, result))) return (await payments.get(current.id)) ?? current
+        }
+        cancelOwed.set(current.id, { failure, reason })
+        emit({
+          name: "ps.settlement.failed",
+          paymentRequestId: current.paymentRequestId,
+          paymentId: current.id,
+          data: { network: current.network, reason: "cancel_failed", cause: reason },
+        })
+        return (await payments.get(current.id)) ?? current
+      }
+    }
+    cancelOwed.delete(current.id)
+    if (await payments.transition(current.id, from, { status: "failed", failure, next: undefined })) {
+      emit({ name: "ps.settlement.failed", paymentRequestId: current.paymentRequestId, paymentId: current.id, data: { network: current.network, reason } })
+    }
+    return (await payments.get(current.id)) ?? current
+  }
+
+  /**
+   * Retries an outstanding PaymentIntent cancel, once, for a payment that is
+   * owed a failure. Does nothing for any other payment. Called by every route
+   * that touches a payment: settle, the receipt route, the webhook and the
+   * approver routes.
+   */
+  async function touch(record: PaymentRecord): Promise<PaymentRecord> {
+    const owed = cancelOwed.get(record.id)
+    return owed ? fail(record, owed.failure, owed.reason) : record
   }
 
   /** Cancels whatever settlement was started for a payment that is no longer payable. */
@@ -451,18 +512,12 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     try {
       result = await adapter.verify(payment)
     } catch {
+      // A confirmed cancel proves the PaymentIntent had not succeeded, so retrying an owed one needs no verify.
+      await touch(payment)
       return { ok: false, refusal: notSettled }
     }
     if (result.settled) {
-      const settlement = { ref: result.ref, settledAt: result.settledAt }
-      if (await payments.transition(paymentId, "requires_payment", { status: "settled", next: undefined, settlement })) {
-        emit({
-          name: "ps.settlement.confirmed",
-          paymentRequestId: payment.paymentRequestId,
-          paymentId,
-          data: { network: payment.network, ref: result.ref, amount: formatMoney(payment.amount), settledAt: result.settledAt.toISOString() },
-        })
-      }
+      await confirm(payment, result)
       const now = await payments.get(paymentId)
       return now?.status === "settled" ? { ok: true, payment: now } : { ok: false, refusal: notSettled }
     }
@@ -470,12 +525,32 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
       emit({ name: "ps.settlement.failed", paymentRequestId: payment.paymentRequestId, paymentId, data: { network: payment.network, reason: "mismatch" } })
       return { ok: false, refusal: new Refusal(409, "settlement_mismatch", "The settlement does not match the payment; no receipt was issued.") }
     }
-    if (result.reason === "failed") await fail(payment, result.detail ?? "The payment failed.")
+    // At most one fail, so one cancel attempt, per call.
+    const owed = cancelOwed.get(paymentId)
+    let after: PaymentRecord | undefined
+    if (result.reason === "failed") after = await fail(payment, result.detail ?? "The payment failed.")
+    else if (owed) after = await fail(payment, owed.failure, owed.reason)
     // Settlement that arrived is honoured above; one that has not arrived by the expiry never will.
     else if (payment.expiresAt && payment.expiresAt.getTime() <= clock.now().getTime()) {
-      await fail(payment, "The payment request expired before it was paid.", "expired")
+      after = await fail(payment, "The payment request expired before it was paid.", "expired")
     }
+    // A PaymentIntent that succeeded while its cancel was refused settled the payment instead.
+    if (after?.status === "settled") return { ok: true, payment: after }
     return { ok: false, refusal: notSettled }
+  }
+
+  /** Moves a payment from `requires_payment` to `settled` with one compare-and-set; true for the caller that moved it. */
+  async function confirm(payment: PaymentRecord, result: Extract<SettlementResult, { settled: true }>): Promise<boolean> {
+    const settlement = { ref: result.ref, settledAt: result.settledAt }
+    if (!(await payments.transition(payment.id, "requires_payment", { status: "settled", next: undefined, settlement }))) return false
+    cancelOwed.delete(payment.id)
+    emit({
+      name: "ps.settlement.confirmed",
+      paymentRequestId: payment.paymentRequestId,
+      paymentId: payment.id,
+      data: { network: payment.network, ref: result.ref, amount: formatMoney(payment.amount), settledAt: result.settledAt.toISOString() },
+    })
+    return true
   }
 
   /**
@@ -494,15 +569,15 @@ export function createPaymentService(deps: PaymentServiceDeps): Hono {
     const failed = (reason: string) =>
       emit({ name: "ps.settlement.failed", paymentRequestId: payment.paymentRequestId, paymentId, data: { network: "stripe", reason, paymentIntent: intent.id } })
     if (event.type === "payment_intent.succeeded") {
+      // settle verifies first, so a PaymentIntent that succeeded wins over a cancel that is still owed.
       if (payment.status === "requires_payment") await settle(paymentId)
-      // Money arrived for a payment that already failed, after its cancel did not go through. No receipt is issued; say so loudly.
-      else if (payment.status === "failed" && intent.status === "succeeded") failed("succeeded_after_failure")
+      else await touch(payment)
       return
     }
     // A decline is not final: the payer can try again on the same PaymentIntent, so the payment stays payable.
     // Events can arrive out of order, so a PaymentIntent that has since succeeded is left to the success path.
-    if (payment.status !== "requires_payment" || intent.status === "succeeded") return
-    failed("declined")
+    if (payment.status === "requires_payment" && intent.status !== "succeeded" && !cancelOwed.has(paymentId)) failed("declined")
+    else await touch(payment)
   }
 
   /** Signs the receipt for a settled payment once, and returns the same JWT every time after. */
