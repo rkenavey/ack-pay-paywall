@@ -188,7 +188,7 @@ export function createServerAgent(deps: ServerAgentDeps): Hono
 
 **Verifying a receipt.** In this order; the first failure answers `402` with the listed code and a fresh payment request.
 
-1. `verifyPaymentReceipt(header, { resolver, trustedReceiptIssuers: [paymentService.did], paymentRequestIssuer: identity.did })`. `UntrustedIssuerError` maps to `receipt_untrusted_issuer`, `CredentialExpiredError` to `receipt_expired`, anything else to `receipt_invalid`. From here on read only the values this call returned.
+1. `verifyPaymentReceipt(header, { resolver, trustedReceiptIssuers: [paymentService.did], paymentRequestIssuer: identity.did })`. `UntrustedIssuerError` maps to `receipt_untrusted_issuer`; `CredentialExpiredError`, or a JWT rejected only because its `exp` has passed (beyond ACK's clock-skew window the error is not a `CredentialExpiredError`), to `receipt_expired`; anything else to `receipt_invalid`. From here on read only the values this call returned.
 2. `paymentRequest.id` is in the store, else `receipt_invalid`. Its `resourceId` is the requested resource, else `receipt_wrong_resource`.
 3. `credentialSubject.paymentOptionId` is one of the request's option ids, else `receipt_invalid`.
 4. `store.redeem(id)` returns true, else `receipt_already_redeemed`.
@@ -229,6 +229,7 @@ export interface StripeGateway {
   createPaymentIntent(input: { amount: number; currency: string; description?: string; metadata: Record<string, string>; idempotencyKey: string }): Promise<{ id: string; clientSecret: string }>
   retrievePaymentIntent(id: string): Promise<{ id: string; status: string; amount: number; amountReceived: number; currency: string; metadata: Record<string, string> }>
   constructWebhookEvent(rawBody: string, signature: string): { id: string; type: string; paymentIntentId?: string } // throws on a bad signature
+  cancelPaymentIntent(id: string): Promise<void> // cancels a PaymentIntent that can still be paid; resolves for one already canceled
 }
 
 export interface Approval { id: string; paymentId: string; status: "pending" | "approved" | "rejected"; requestedAt: Date; decidedAt?: Date; note?: string }
@@ -440,7 +441,7 @@ Checked against `agentcommercekit@0.11.0` on 2026-11-10. PRO-2 and PRO-3 pin the
 - `createSignedPaymentRequest(init, { issuer, signer, algorithm })` returns `{ paymentRequest, paymentRequestToken }`. Unknown fields in `init` are dropped. `expiresAt` comes back as an ISO string.
 - `verifyPaymentRequestToken(token, { resolver, issuer? })` checks the signature and the schema. It does not reject a past `expiresAt`.
 - `createPaymentReceipt(...)` returns an unsigned credential. `signCredential(credential, { did, signer, alg })` returns the JWT string. The README shows an older signature.
-- `verifyPaymentReceipt(receipt, { resolver, trustedReceiptIssuers, paymentRequestIssuer })` returns `{ receipt, paymentRequestToken, paymentRequest }`, where `receipt.issuer` is `{ id }`. It throws `UntrustedIssuerError`, `CredentialExpiredError` or `InvalidPaymentRequestTokenError`. It does not check revocation.
+- `verifyPaymentReceipt(receipt, { resolver, trustedReceiptIssuers, paymentRequestIssuer })` returns `{ receipt, paymentRequestToken, paymentRequest }`, where `receipt.issuer` is `{ id }`. It throws `UntrustedIssuerError`, `CredentialExpiredError` or `InvalidPaymentRequestTokenError`; a receipt more than about 300 s past its expiry fails the JWT check with a plain expiry error instead of `CredentialExpiredError`. It does not check revocation.
 - `createJwt(payload, { issuer, signer, expiresIn }, { alg })` and `verifyJwt(jwt, { resolver, issuer?, audience? })` cover the initiation token. PS-2 must prove a wrong audience is rejected; if `verifyJwt` does not enforce it, compare the verified `aud` ourselves.
 - `keypairToJwk` and `jwkToKeypair` round-trip a keypair.
 
@@ -451,7 +452,7 @@ Real Stripe in test mode, done the way Stripe recommends for a custom flow. Chec
 - **Server creates the PaymentIntent** in `StripeAdapter.begin`, through `StripeGateway`: amount and currency from the payment record, `automatic_payment_methods: { enabled: true, allow_redirects: "never" }`, metadata `{ paymentId, paymentRequestId, paymentOptionId, payer }`, idempotency key `pi:<paymentId>`. The `NextAction` carries the client secret and the publishable key, so the browser needs no Stripe configuration.
 - **Browser confirms.** `loadStripe(publishableKey)` from `@stripe/stripe-js`, memoised outside render. `<Elements options={{ clientSecret }}>` with `<PaymentElement />`. Submit calls `stripe.confirmPayment({ elements, confirmParams: { return_url }, redirect: "if_required" })`. A returned `error` is shown and the user can try again on the same PaymentIntent. Card data never touches our server and production code never confirms server-side.
 - **Server verifies before issuing a receipt.** `StripeAdapter.verify` retrieves the PaymentIntent and requires `status === "succeeded"`, `amountReceived` equal to the expected amount, the expected currency and `metadata.paymentId` equal to the payment id. Anything else is `pending`, `failed` or `mismatch`. The browser's word is never the evidence.
-- **Webhook.** `POST /payment-service/webhooks/stripe` reads the raw body, verifies the `Stripe-Signature` header with `STRIPE_WEBHOOK_SECRET`, handles `payment_intent.succeeded` (call `settle`) and `payment_intent.payment_failed` (fail the payment), ignores other types with `200`, and is idempotent per event id. Without a secret it answers `503` and processes nothing. Local use: `stripe listen --forward-to localhost:8787/payment-service/webhooks/stripe`. The receipt route also verifies settlement directly, so the demo works without the Stripe CLI.
+- **Webhook.** `POST /payment-service/webhooks/stripe` reads the raw body, verifies the `Stripe-Signature` header with `STRIPE_WEBHOOK_SECRET`, handles `payment_intent.succeeded` (call `settle`) and `payment_intent.payment_failed` (emit `ps.settlement.failed` with `reason=declined` and leave the payment in `requires_payment`, so the payer can retry on the same PaymentIntent), ignores other types with `200`, and is idempotent per event id. Only a `canceled` PaymentIntent or an expired payment request fails a Stripe payment, and whenever the payment service fails a Stripe payment for any reason it cancels the PaymentIntent through `StripeGateway.cancelPaymentIntent`, so a failed payment can never later capture money. Without a secret it answers `503` and processes nothing. Local use: `stripe listen --events payment_intent.succeeded,payment_intent.payment_failed --forward-to localhost:8787/payment-service/webhooks/stripe`. The receipt route also verifies settlement directly, so the demo works without the Stripe CLI.
 - **Startup guard.** A key that is not a test-mode key stops the process.
 - **Credentials.** The human supplies `STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY`, and optionally `STRIPE_WEBHOOK_SECRET`. Ask for them when T5 starts, write them to `.env` and nowhere else, and do not echo them back.
 - **Live check.** `pnpm test:stripe-live` runs `tests/stripe-live` against the real test-mode API: begin a payment, confirm the PaymentIntent with the test payment method `pm_card_visa` (a test-only shortcut that stands in for the browser), then `verify`, settle, issue and verify the receipt. It exits non-zero when the keys are missing.
@@ -547,7 +548,7 @@ Server agent, `packages/server/test/server-agent` (T3):
 | SA-4 | A valid receipt in `Payment-Receipt` answers 200 with the resource. |
 | SA-5 | A receipt signed by an untrusted issuer answers 402 `receipt_untrusted_issuer` with a fresh request. |
 | SA-6 | A tampered receipt, a non-JWT value and a credential of another type each answer 402 `receipt_invalid`. |
-| SA-7 | An expired receipt answers 402 `receipt_expired`. |
+| SA-7 | An expired receipt answers 402 `receipt_expired`, both just past its expiry and long after it (beyond ACK's clock-skew window). |
 | SA-8 | A valid receipt for another resource answers 402 `receipt_wrong_resource`. |
 | SA-9 | A receipt whose payment request token was signed by another server agent, or whose request id was never issued here, answers 402 `receipt_invalid`. |
 | SA-10 | A receipt is delivered once: the second presentation answers 402 `receipt_already_redeemed`, and two concurrent presentations deliver exactly once. |
@@ -610,7 +611,7 @@ Stripe, `packages/server/test/stripe`, `packages/client/test/stripe`, `tests/str
 | STR-2 | With the PaymentIntent `succeeded` and matching, the receipt route issues a receipt whose `settlementRef` is the PaymentIntent id. |
 | STR-3 | With the PaymentIntent in `requires_payment_method` or `processing`, the receipt route answers 409 `payment_not_settled`. |
 | STR-4 | A succeeded PaymentIntent with a different amount, currency or `metadata.paymentId` answers 409 `settlement_mismatch` and issues nothing. |
-| STR-5 | A correctly signed `payment_intent.succeeded` webhook settles the payment; delivering the same event again changes nothing; `payment_intent.payment_failed` fails the payment. |
+| STR-5 | A correctly signed `payment_intent.succeeded` webhook settles the payment; delivering the same event again changes nothing; `payment_intent.payment_failed` leaves the payment in `requires_payment` and a later success still settles it; a payment that fails (canceled PaymentIntent or expired request) has its PaymentIntent cancelled. |
 | STR-6 | A webhook with a bad or missing signature answers 400 and changes nothing. With no webhook secret the route answers 503. |
 | STR-7 | Config rejects live-mode keys and a secret key without a publishable key. With no Stripe keys the server starts and payment requests offer no Stripe option. |
 | STR-8 | No event and no log line contains the Stripe secret key or a client secret. |
