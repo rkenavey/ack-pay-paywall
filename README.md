@@ -10,25 +10,92 @@ The wire contract is in [docs/protocol.md](docs/protocol.md).
 
 ## What works today
 
-- The workspace: install, typecheck, lint and the test runner.
-- The wire contract package `@paywall/protocol`: types and schemas for every body, the protocol events, money helpers, and the clock and id interfaces. Its tests pass.
-- The spend policy (`packages/server/src/policy`): an allowlist of payees and a human-approval threshold, with its configuration parser. Its tests pass. See [docs/policy.md](docs/policy.md).
-- The server (`packages/server`): the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for a human, settles on the sandbox network and signs ACK receipts. `pnpm setup:env` writes a working `.env`, and the server logs one line per protocol event. Its tests pass. See [docs/server.md](docs/server.md).
-- The client (`packages/client`): the client agent verifies the `402`, signs a payment initiation, pays on the sandbox network, verifies the receipt and retries once; it waits while a payment needs approval. The page lists both catalogs, shows every step of a run with the decoded payment request and receipt, and writes each event to the browser console. Its identity is an Ed25519 `did:key` kept in `localStorage`. See [docs/client.md](docs/client.md) and [docs/architecture.md](docs/architecture.md).
-- Human approval: the approver routes on the payment service, guarded by the approver token, and a *Human approver* panel on the page that lists waiting payments and approves or rejects them. Approving starts settlement and the waiting run completes; rejecting ends it `approval_rejected`. See [docs/approvals.md](docs/approvals.md).
-- Stripe test mode: with test-mode keys in `.env`, payment requests also offer `stripe-usd`. The payment service creates a PaymentIntent after the spend policy allows the payment, the page shows Stripe's Payment Element (3D Secure and declines handled in the page), and the payment service retrieves the PaymentIntent from Stripe and checks its status, amount, currency and payment id before it signs a receipt. A signed Stripe webhook can settle or fail payments too. `pnpm test:stripe-live` checks it against the real test-mode API. See [docs/stripe.md](docs/stripe.md).
-- The test suite for every part of the system, and the testkit it uses. The protocol, policy, server, client agent, page, Stripe, approval and in-process end-to-end tests pass, and so does the live Stripe check; the over-HTTP sandbox case fails only its count of responses.
+- The wire contract package `@paywall/protocol`: types and schemas for every body, the protocol events, money helpers, and the clock and id interfaces. See [docs/protocol.md](docs/protocol.md).
+- The spend policy: an allowlist of payees and a human-approval threshold, with its configuration parser. See [docs/policy.md](docs/policy.md).
+- The server: the Acme and Globex server agents answer `402` with signed ACK payment requests and deliver each resource once for a valid receipt; the payment service verifies signed initiations, applies the spend policy, holds payments above $50 for a human, settles on the sandbox network or Stripe test mode and signs ACK receipts. It logs one line per protocol event. See [docs/server.md](docs/server.md).
+- The client: the client agent verifies the `402`, signs a payment initiation, pays, verifies the receipt and retries once; it waits while a payment needs approval. The page lists both catalogs, shows every step of a run with the decoded payment request and receipt, and writes each event to the browser console. See [docs/client.md](docs/client.md) and [docs/architecture.md](docs/architecture.md).
+- Human approval: the approver routes, guarded by the approver token, and a *Human approver* panel on the page. See [docs/approvals.md](docs/approvals.md).
+- Stripe test mode: with test-mode keys in `.env`, payment requests also offer `stripe-usd`, paid with Stripe's Payment Element; the payment service checks the PaymentIntent with Stripe before it signs a receipt, and a signed Stripe webhook can settle or fail payments. See [docs/stripe.md](docs/stripe.md).
+- The test suite for every part of the system, and the testkit it uses. Every offline test passes, and so does the live Stripe check. See [docs/testing.md](docs/testing.md).
 
 ## Prerequisites
 
 - Node.js 22.18 or later (the server runs TypeScript directly). Developed on Node 26.
 - pnpm 12.
+- Google Chrome or another current browser for the page.
+- Optional: a Stripe account for test-mode keys.
 
-## Install
+## Quickstart
+
+From a fresh clone:
 
 ```sh
+git clone https://github.com/rkenavey/ack-pay-paywall.git
+cd ack-pay-paywall
 pnpm install
+pnpm setup:env   # writes .env: three fresh keys, the Acme DID on the allowlist, a random approver token
+pnpm test        # every offline test
+pnpm dev         # server on http://localhost:8787, page on http://localhost:5173
 ```
+
+`pnpm setup:env` prints the three public DIDs and leaves the Stripe lines blank, so only the sandbox network is offered until you add keys. It refuses to overwrite an existing `.env`; delete the file to start over. `.env` is readable only by you and git ignores it. `.env.example` documents every variable.
+
+Open http://localhost:5173. The page shows the client agent's DID (a fresh Ed25519 `did:key` kept in the browser's `localStorage`, which is demo-grade key storage), the *Catalog*, the *Agent run* and the *Human approver* panel. Stop `pnpm dev` with Ctrl-C.
+
+## Demo scenarios
+
+Each Fetch starts one run of the client agent. The status line, the timeline and the browser console show every step; Reset clears the page.
+
+### 1. Paid and delivered: Market brief ($5.00, Acme)
+
+1. Press Fetch on **Market brief**.
+2. The run goes `requesting`, `verifying_request`, `selecting_option`, `initiating`, `paying`, `fetching_receipt`, `retrying`, `delivered`.
+3. *Payment request* shows the payee (Acme's DID), the description, $5.00 and the options, with the one the agent chose marked. Without Stripe keys that is `sandbox-usd`, which settles at once.
+4. *Receipt* shows the issuer (the payment service's DID), the payer (the agent's DID), the option and the expiry; below it is the content.
+
+With Stripe keys the agent chooses `stripe-usd`: while the run is `paying`, *Card payment (Stripe test mode)* appears. Enter `4242 4242 4242 4242`, any future expiry, any CVC and any postal code, and press Pay. The run continues to `delivered` and the receipt's option is `stripe-usd`.
+
+### 2. Waiting for a human: Annual report ($75.00, Acme)
+
+1. Press Fetch on **Annual report**. It is over the $50.00 approval threshold, so the run stops at `awaiting_approval (waiting for a human to approve the payment)`.
+2. In *Human approver*, paste the value of `APPROVER_TOKEN` from `.env` into *Approver token* and press *Load approvals*.
+3. The waiting payment shows its amount, description, payer and payee. Press *Approve*.
+4. Within a second the run continues: it pays (on Stripe, enter the test card as above), fetches the receipt and ends `delivered`.
+
+Press *Reject* instead and the run ends `approval_rejected`; nothing is paid. If nobody decides within five minutes the run ends `approval_timeout`. See [docs/approvals.md](docs/approvals.md).
+
+### 3. Refused by policy: Partner feed ($5.00, Globex)
+
+1. Press Fetch on **Partner feed**.
+2. The run gets Globex's `402`, verifies it and initiates a payment, then ends `failed` with `policy_denied` and rule `counterparty_not_allowed`: Globex's DID is not on `POLICY_ALLOWED_COUNTERPARTIES`. The payment service refuses before any money moves and stores nothing. See [docs/policy.md](docs/policy.md).
+
+## Adding Stripe test-mode keys
+
+1. In the Stripe Dashboard, in test mode, open **Developers → API keys**.
+2. Put the keys in `.env`, and nowhere else:
+
+   ```sh
+   STRIPE_SECRET_KEY=sk_test_your_secret_key
+   STRIPE_PUBLISHABLE_KEY=pk_test_your_publishable_key
+   ```
+
+3. Restart `pnpm dev`. The server's startup notice now reads `Networks: sandbox, stripe (test mode)`, and every payment request offers `stripe-usd`. Live-mode keys stop the server.
+4. `pnpm test:stripe-live` checks the integration against the real test-mode API.
+
+The secret key never leaves the server. A webhook secret is optional; [docs/stripe.md](docs/stripe.md) covers it, the test cards and what the server checks before it signs a receipt.
+
+## Reading the logs
+
+The server writes one line per protocol event to standard output (startup notices go to standard error). Four lines of a sandbox purchase, with ids shortened and some data cut:
+
+```
+00:08:44.170 server-agent     server.request.received         resource=market-brief receipt=false
+00:08:44.193 server-agent     server.payment_required.issued  pr=pr_d91bda19… resource=market-brief amount=$5.00 options=sandbox-usd …
+00:08:44.219 payment-service  ps.policy.evaluated             pr=pr_d91bda19… pay=pay_983df437… outcome=allow rule=within_limits amount=$5.00 …
+00:08:44.231 server-agent     server.resource.delivered       pr=pr_d91bda19… resource=market-brief
+```
+
+Each line is the UTC time, the actor (`server-agent`, `payment-service` or `human`), the event, then `pr=` (the payment request id), `pay=` (the payment id) and the event's data. Follow one purchase by its `pr=` id. Tokens appear only as their last 8 characters; keys, client secrets and the approver token never appear. Under `pnpm dev` each line is prefixed `[server]`, and the ellipsis before a token tail prints as `...`. `LOG_FORMAT=json` writes one JSON object per event instead. The page's timeline and the browser console (`[paywall] …`) show the client agent's events. [docs/server.md](docs/server.md#reading-the-log) explains a full log line by line.
 
 ## Scripts
 
@@ -39,28 +106,10 @@ pnpm install
 | `pnpm test` | Every offline test (Vitest). See [docs/testing.md](docs/testing.md). |
 | `pnpm test:stripe-live` | The live check against Stripe test mode; needs Stripe test keys in `.env`. |
 | `pnpm build` | Builds the client bundle with Vite into `packages/client/dist`. |
-| `pnpm dev` | Starts the server and the client together. |
+| `pnpm dev` | Starts the server and the client together, restarting on change. |
 | `pnpm setup:env` | Writes a `.env` with fresh keys. |
 
-Run `pnpm setup:env` once before starting the server; it refuses to overwrite an existing `.env`. `pnpm --filter @paywall/server start` starts the server alone on port 8787 ([docs/server.md](docs/server.md) shows it in use with `curl`). `.env.example` documents every configuration variable.
-
-## Sandbox demo
-
-```sh
-pnpm install
-pnpm setup:env   # once: writes .env with fresh keys and the Acme DID on the allowlist
-pnpm dev         # server on http://localhost:8787, page on http://localhost:5173
-```
-
-Open http://localhost:5173. The page shows the client agent's DID and the catalog of both server agents. Press Fetch on:
-
-- **Market brief** ($5.00, Acme). The run goes `requesting`, `verifying_request`, `selecting_option`, `initiating`, `paying`, `fetching_receipt`, `retrying`, `delivered`. The page shows the payment request (payee, amount, the `sandbox-usd` option marked as selected), the verified receipt (issuer, payer, option, expiry) and the content.
-- **Partner feed** ($5.00, Globex). Globex is not on the allowlist, so the payment service refuses before anything is paid: the run fails `policy_denied` with rule `counterparty_not_allowed`.
-- **Annual report** ($75.00, Acme). Over the $50 approval threshold: the run stops at `awaiting_approval`, waiting for a human. In the *Human approver* panel, paste `APPROVER_TOKEN` from `.env`, press *Load approvals*, and press *Approve*: the run pays and ends `delivered`. Press *Reject* instead and it ends `approval_rejected`. Nobody deciding within five minutes ends it `approval_timeout`. See [docs/approvals.md](docs/approvals.md).
-
-With Stripe test-mode keys in `.env` (see [docs/stripe.md](docs/stripe.md)), the agent prefers the `stripe-usd` option: while the run is `paying`, a *Card payment (Stripe test mode)* form appears in the agent run. Pay with `4242 4242 4242 4242`, any future expiry and any CVC, and the run continues to `delivered`; the receipt's option is `stripe-usd`.
-
-The timeline lists every client event; the browser console shows the same events, and the server terminal prints the server agent and payment service events for the same payment request id ([docs/server.md](docs/server.md) explains the lines).
+`pnpm --filter @paywall/server start` starts the server alone on port 8787 ([docs/server.md](docs/server.md) shows it in use with `curl`). To try the built page, run `pnpm build` and then `pnpm --filter @paywall/client exec vite preview --port 5173` beside the server.
 
 ## Repository layout
 

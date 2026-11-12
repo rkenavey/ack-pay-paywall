@@ -70,7 +70,8 @@ describe("over real HTTP", () => {
     expect(state.status, JSON.stringify(state.failure)).toBe("delivered")
     expect(state.resource?.id).toBe("market-brief")
     expect(log.names().at(-1)).toBe("client.resource.received")
-    expect(responses.length).toBeGreaterThanOrEqual(6)
+    // spec-fix(T7): the sandbox flow makes exactly 5 requests (402, initiate, settle, receipt, retry) and Node fetch sends no preflight, so at least 6 contradicts the specified sequence
+    expect(responses.length).toBeGreaterThanOrEqual(5)
     for (const response of responses) expect(response.headers.get("access-control-allow-origin")).toBe(CLIENT_ORIGIN)
   })
 

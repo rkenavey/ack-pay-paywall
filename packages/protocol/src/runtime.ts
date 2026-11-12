@@ -43,14 +43,3 @@ export const randomIds: IdGenerator = {
     return `${prefix}_${hex}`
   },
 }
-
-/**
- * Thrown by a stub whose behaviour has not been built yet. The argument names
- * the piece of work that will build it.
- */
-export class NotImplementedError extends Error {
-  constructor(task: string) {
-    super(`not implemented yet (${task})`)
-    this.name = "NotImplementedError"
-  }
-}

@@ -13,7 +13,14 @@ STRIPE_SECRET_KEY=sk_test_your_secret_key
 STRIPE_PUBLISHABLE_KEY=pk_test_your_publishable_key
 ```
 
-Set both or neither. Restart the server; its startup notice lists `Networks: sandbox, stripe (test mode)`. The secret key stays on the server. The browser gets only the publishable key, inside the payment's next action, so the page needs no Stripe configuration of its own.
+Set both or neither. Restart the server; its startup notice lists the Stripe network and the webhook state:
+
+```
+  Networks: sandbox, stripe (test mode); CORS origin http://localhost:5173
+  Stripe webhook: not configured (receipts verify the PaymentIntent directly)
+```
+
+The secret key stays on the server. The browser gets only the publishable key, inside the payment's next action, so the page needs no Stripe configuration of its own.
 
 ## What happens in a payment
 
